@@ -270,6 +270,7 @@ function pantallaPrincipal() {
     <a class="marca" href="#/inicio">${esc(NOMBRE_APP)}</a>
     <nav>
       <a href="#/inicio" data-r="inicio">Inicio</a>
+      ${S.ganttListo ? '<a href="#/gantt" data-r="gantt">Gantt general</a>' : ''}
       ${puedeCrear() ? '<a href="#/nueva" data-r="nueva">Nueva solicitud</a>' : ''}
       ${esAdmin() ? '<a href="#/admin" data-r="admin">Administración</a>' : ''}
     </nav>
@@ -287,6 +288,7 @@ function router() {
   const [, ruta = 'inicio', id] = (location.hash || '#/inicio').split('/');
   $$('nav a, .usuario a').forEach((a) => a.classList.toggle('activo', a.dataset.r === ruta));
   if (ruta === 'nueva') return vistaNueva();
+  if (ruta === 'gantt') return vistaGanttGeneral();
   if (ruta === 'p' && id) return vistaDetalle(id);
   if (ruta === 'admin') return vistaAdmin();
   if (ruta === 'cuenta') return vistaCuenta();
@@ -374,6 +376,102 @@ function tablaProyectos(lista) {
         <td>${pillPlan(estadoPlan(p))}</td>
       </tr>`).join('')}
     </tbody></table></div>`;
+}
+
+// ---------------------------------------------------------------------
+// Gantt general: todos los proyectos en una sola línea de tiempo
+// ---------------------------------------------------------------------
+async function vistaGanttGeneral() {
+  const v = vista('Cargando proyectos…');
+  if (!S.ganttListo) { v.innerHTML = '<p class="muted">Falta ejecutar <b>supabase/002_gantt.sql</b> en Supabase para activar el Gantt.</p>'; return; }
+  const { data, error } = await sb.from('proyectos').select('*').order('fecha_requerida_gas', { ascending: true, nullsFirst: false });
+  if (error) { v.innerHTML = `<p class="error">${esc(errorTxt(error))}</p>`; return; }
+
+  const todos = data.map((p) => { const plan = planDe(p); return { p, plan, st: estadoPlan(p, plan) }; });
+  const f = { seg: '', estado: '', entregados: false, q: '' };
+
+  v.innerHTML = `
+    <div class="titulo"><h1>Gantt general</h1></div>
+    <div class="kpis" id="ggKpis"></div>
+    <div class="gg-filtros">
+      <input id="ggBuscar" type="search" placeholder="Buscar por folio, nombre o municipio…">
+      <select id="ggSeg"><option value="">Todos los segmentos</option>${SEGMENTOS.map((x) => `<option>${x}</option>`).join('')}</select>
+      <label class="switch"><input type="checkbox" id="ggEntregados"> Incluir entregados</label>
+    </div>
+    <div id="ggCuerpo"></div>`;
+
+  const pintar = () => {
+    const q = f.q.trim().toLowerCase();
+    const base = todos.filter(({ p }) =>
+      (f.entregados || num(p.etapa) < 8) && (!f.seg || p.segmento === f.seg) &&
+      (!q || [p.folio, p.nombre, p.municipio].some((x) => (x || '').toLowerCase().includes(q))));
+    const conPlan = base.filter((x) => x.plan);
+    const sinFecha = base.filter((x) => !x.plan);
+    const cuenta = (c) => conPlan.filter((x) => x.st?.clase === c && num(x.p.etapa) < 8).length;
+    const kpi = (clave, n, txt, extra = '') => `<button class="kpi ${extra} ${f.estado === clave ? 'activo' : ''}" data-estado="${clave}"><b>${n}</b><span>${txt}</span></button>`;
+    $('#ggKpis').innerHTML = kpi('', base.length, 'Proyectos') + kpi('ok', cuenta('ok'), 'A tiempo', 'gk-ok') +
+      kpi('riesgo', cuenta('riesgo'), 'En riesgo', 'gk-riesgo') + kpi('mal', cuenta('mal'), 'Atrasados', 'alerta') +
+      kpi('sin', sinFecha.length, 'Sin fecha de gas', 'k0');
+
+    let filas = f.estado === 'sin' ? [] : conPlan.filter((x) => !f.estado || (x.st?.clase === f.estado && num(x.p.etapa) < 8));
+    filas = filas.sort((a, b) => a.plan.req - b.plan.req);
+    const listaSin = !f.estado || f.estado === 'sin' ? sinFecha : [];
+
+    $('#ggCuerpo').innerHTML = (filas.length ? ganttGeneralHtml(filas) : '<p class="vacio">No hay proyectos con fecha requerida de gas en esta vista.</p>') +
+      (listaSin.length ? `<div class="card gg-sin"><h2>Sin fecha requerida de gas (${listaSin.length})</h2>
+        <p class="muted chico">No aparecen en el Gantt hasta que se capture la fecha en el proyecto.</p>
+        <ul>${listaSin.map(({ p }) => `<li><a href="#/p/${p.id}"><b>${esc(p.folio)}</b> · ${esc(p.nombre)}</a> ${badgeEtapa(p.etapa)}</li>`).join('')}</ul></div>` : '');
+
+    $$('.kpi', v).forEach((b) => (b.onclick = () => { f.estado = f.estado === b.dataset.estado ? '' : b.dataset.estado; pintar(); }));
+    $$('.g-fila[data-id]', v).forEach((r) => (r.onclick = () => (location.hash = `#/p/${r.dataset.id}`)));
+  };
+
+  $('#ggBuscar').oninput = (e) => { f.q = e.target.value; pintar(); };
+  $('#ggSeg').onchange = (e) => { f.seg = e.target.value; pintar(); };
+  $('#ggEntregados').onchange = (e) => { f.entregados = e.target.checked; pintar(); };
+  pintar();
+}
+
+function ganttGeneralHtml(filas) {
+  const hoy = diaDe(hoyISO());
+  const fechas = [hoy, ...filas.flatMap(({ plan }) => [plan.filas[0].inicio, plan.filas[plan.filas.length - 1].fin, plan.req])];
+  const min = sumaDias(new Date(Math.min(...fechas)), -10);
+  const max = sumaDias(new Date(Math.max(...fechas)), 10);
+  const pct = (d) => (((d - min) / (max - min)) * 100).toFixed(2);
+  const ancho = (a, b) => Math.max(0.4, ((b - a) / (max - min)) * 100).toFixed(2);
+
+  const meses = [];
+  for (let m = new Date(min.getFullYear(), min.getMonth() + 1, 1, 12); m < max; m = new Date(m.getFullYear(), m.getMonth() + 1, 1, 12)) meses.push(m);
+  const paso = meses.length > 18 ? 3 : meses.length > 9 ? 2 : 1; // menos etiquetas si el rango es largo
+  const lineas = `${meses.map((m) => `<i class="g-mes" style="left:${pct(m)}%"></i>`).join('')}<i class="g-hoy" style="left:${pct(hoy)}%"></i>`;
+
+  const html = filas.map(({ p, plan, st }) => {
+    const n = num(p.etapa);
+    const actual = n >= 8 ? 99 : Math.max(1, n);
+    const segs = plan.filas.map((s) => {
+      const clase = s.n < actual ? 'hecho' : s.n === actual ? `actual ${st?.clase || ''}` : 'futuro';
+      return `<div class="gg-seg ${clase} ${s.despues ? 'post' : ''}" style="left:${pct(s.inicio)}%;width:${ancho(s.inicio, s.fin)}%"
+        title="${esc(s.etapa)}: ${fecha(isoDe(s.inicio))} – ${fecha(isoDe(s.fin))}${s.n === actual ? ' (etapa actual)' : ''}"></div>`;
+    }).join('');
+    return `<div class="g-fila" data-id="${p.id}" title="Abrir ${esc(p.folio)}">
+      <div class="g-label"><b>${esc(p.folio)} · ${esc(p.nombre)}</b>
+        <small>${esc(p.segmento)} · ${esc(nombreCorto(p.etapa))} · gas ${fecha(p.fecha_requerida_gas)}</small>
+        <span class="gg-pill">${pillPlan(st)}</span></div>
+      <div class="g-track">${lineas}${segs}<i class="gg-gas" style="left:${pct(plan.req)}%" title="Gas requerido: ${fecha(p.fecha_requerida_gas)}"></i></div>
+    </div>`;
+  }).join('');
+
+  return `<div class="gantt gg">
+    <div class="g-fila g-escala"><div class="g-label"></div><div class="g-track">
+      ${meses.map((m, i) => (i % paso ? '' : `<span style="left:${pct(m)}%">${m.toLocaleDateString('es-MX', { month: 'short', year: '2-digit' })}</span>`)).join('')}
+    </div></div>
+    ${html}
+  </div>
+  <div class="g-leyenda">
+    <span><i class="sw gg-hecho"></i>Etapa terminada</span><span><i class="sw ok"></i>Etapa actual a tiempo</span>
+    <span><i class="sw gg-riesgo"></i>Actual en riesgo</span><span><i class="sw tarde"></i>Actual atrasada</span>
+    <span><i class="sw plan"></i>Etapa por venir</span><span><i class="sw hoy"></i>Hoy</span><span><i class="sw req"></i>Gas requerido</span>
+  </div>`;
 }
 
 // ---------------------------------------------------------------------

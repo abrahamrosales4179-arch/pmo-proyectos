@@ -194,4 +194,28 @@ input.corto { width: 70px; }
 .sw { display: inline-block; width: 14px; height: 8px; border-radius: 2px; }
 .sw.plan { background: #b9c6d6; } .sw.ok { background: var(--ok); } .sw.curso { background: var(--azul); } .sw.tarde { background: var(--rojo); }
 .sw.hoy { width: 3px; height: 12px; background: var(--azul); } .sw.req { width: 3px; height: 12px; background: var(--rojo); }
-@media (max-width: 600px) { .g-fila { grid-template-columns: 110px 1fr; } .g-label small { display: none; } }
+/* Gantt general */
+.gg-filtros { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+.gg-filtros input[type=search] { flex: 1 1 260px; width: auto; }
+.gg-filtros select { width: auto; }
+.kpi.gk-ok b { color: var(--ok); } .kpi.gk-riesgo b { color: #b37400; }
+.gg .g-fila { grid-template-columns: 290px 1fr; }
+.gg .g-fila[data-id] { cursor: pointer; }
+.gg .g-fila[data-id]:hover { background: #f3f8fe; }
+.gg .g-label { grid-template-columns: 1fr auto; column-gap: .4rem; }
+.gg .g-label b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gg .g-label small { grid-column: 1; }
+.gg-pill { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+.gg-seg { position: absolute; top: 13px; height: 18px; border-right: 2px solid #fff; border-radius: 3px; }
+.gg-seg.futuro { background: #b9c6d6; }
+.gg-seg.futuro.post { background: repeating-linear-gradient(45deg, #b9c6d6 0 6px, #d7dfe9 6px 12px); }
+.gg-seg.hecho { background: #8fc9a6; }
+.gg-seg.actual { background: var(--azul); top: 10px; height: 24px; box-shadow: 0 0 0 1px rgba(0,0,0,.15); }
+.gg-seg.actual.ok { background: var(--ok); }
+.gg-seg.actual.riesgo { background: #e0a020; }
+.gg-seg.actual.mal { background: var(--rojo); }
+.gg-gas { position: absolute; top: 15px; width: 12px; height: 12px; margin-left: -6px; background: var(--rojo); transform: rotate(45deg); border: 2px solid #fff; z-index: 3; }
+.sw.gg-hecho { background: #8fc9a6; } .sw.gg-riesgo { background: #e0a020; }
+.gg-sin { margin-top: 1rem; }
+.gg-sin ul { margin: .4rem 0 0; padding-left: 1.1rem; display: grid; gap: .3rem; }
+@media (max-width: 600px) { .gg .g-fila { grid-template-columns: 150px 1fr; } .gg-pill { display: none; } .g-fila { grid-template-columns: 110px 1fr; } .g-label small { display: none; } }
