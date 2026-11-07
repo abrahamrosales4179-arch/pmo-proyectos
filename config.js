@@ -5,8 +5,8 @@
 // reglas (RLS) de schema.sql. NUNCA pongas aquí la "service_role key".
 // =====================================================================
 
-export const SUPABASE_URL = 'https://TU-PROYECTO.supabase.co';
-export const SUPABASE_ANON_KEY = 'PEGA-AQUI-TU-ANON-PUBLIC-KEY';
+export const SUPABASE_URL = 'https://qzygzbgnztqdfhkmsgha.supabase.co';
+export const SUPABASE_ANON_KEY = 'sb_publishable_55HJQy_LSjUuCF-byyLiAw_qjGPgP__';
 
 export const NOMBRE_APP = 'PMO Proyectos DGJ';
 
