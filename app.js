@@ -13,7 +13,7 @@ const BUCKET = 'expedientes';
 const configurado = !SUPABASE_URL.includes('TU-PROYECTO') && !SUPABASE_ANON_KEY.includes('PEGA-AQUI');
 const sb = configurado ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 const app = document.getElementById('app');
-const S = { session: null, perfil: null, municipios: [], configDocs: [], perfiles: [] };
+const S = { session: null, perfil: null, municipios: [], configDocs: [], perfiles: [], tiempos: [], ganttListo: false };
 
 // ---------------------------------------------------------------------
 // Utilidades
@@ -102,6 +102,119 @@ async function cargarCatalogos() {
   S.municipios = mun.data;
   S.configDocs = docs.data;
   S.perfiles = pers.data;
+  // Tiempos del Gantt (si aún no se ejecuta supabase/002_gantt.sql, la app sigue funcionando sin Gantt)
+  const tiempos = await sb.from('config_tiempos').select('*');
+  S.ganttListo = !tiempos.error;
+  S.tiempos = tiempos.data || [];
+}
+
+// ---------------------------------------------------------------------
+// Gantt: se calcula hacia atrás desde la fecha requerida de gas
+// ---------------------------------------------------------------------
+const ETAPAS_ANTES = [1, 3, 4, 5, 6];   // terminan el día que se requiere el gas
+const ETAPAS_DESPUES = [7];             // ocurren después de la puesta en servicio
+const DIA = 86400000;
+function diaDe(x) {
+  if (x instanceof Date) { const d = new Date(x); d.setHours(12, 0, 0, 0); return d; }
+  if (typeof x === 'string' && x.length === 10) return new Date(x + 'T12:00:00');
+  const d = new Date(x); d.setHours(12, 0, 0, 0); return d;
+}
+const sumaDias = (d, n) => new Date(d.getTime() + n * DIA);
+const isoDe = (d) => d.toLocaleDateString('en-CA');
+const semanasDe = (seg, etapa) => Number(S.tiempos.find((t) => t.segmento === seg && t.etapa === etapa)?.semanas ?? 0);
+const totalSemanas = (seg) => ETAPAS_ANTES.reduce((a, n) => a + semanasDe(seg, etapaPorNum(n)), 0);
+const nombreCorto = (e) => e.replace(/^\d+\.\s*/, '');
+
+function planDe(p) {
+  if (!p.fecha_requerida_gas || !S.tiempos.length) return null;
+  const req = diaDe(p.fecha_requerida_gas);
+  const filas = [];
+  let fin = req;
+  for (const n of [...ETAPAS_ANTES].reverse()) {
+    const etapa = etapaPorNum(n);
+    if (!etapa) continue;
+    const inicio = sumaDias(fin, -Math.round(semanasDe(p.segmento, etapa) * 7));
+    filas.unshift({ n, etapa, inicio, fin });
+    fin = inicio;
+  }
+  let ini = req;
+  for (const n of ETAPAS_DESPUES) {
+    const etapa = etapaPorNum(n);
+    if (!etapa) continue;
+    const f = sumaDias(ini, Math.round(semanasDe(p.segmento, etapa) * 7));
+    filas.push({ n, etapa, inicio: ini, fin: f, despues: true });
+    ini = f;
+  }
+  if (!filas.length) return null;
+  const recibido = diaDe(p.created_at);
+  return { req, filas, inicioPlan: filas[0].inicio, holgura: Math.round((filas[0].inicio - recibido) / DIA) };
+}
+
+function estadoPlan(p, plan = planDe(p)) {
+  if (!plan) return null;
+  const n = num(p.etapa);
+  if (n >= 8) return { clase: 'ok', texto: 'Entregado' };
+  const fila = plan.filas.find((f) => f.n === Math.max(1, n));
+  if (!fila) return null;
+  const dias = Math.round((fila.fin - diaDe(hoyISO())) / DIA);
+  if (dias < 0) return { clase: 'mal', texto: `Atrasado ${Math.ceil(-dias / 7)} sem` };
+  if (dias <= 7) return { clase: 'riesgo', texto: 'En riesgo' };
+  return { clase: 'ok', texto: 'A tiempo' };
+}
+const pillPlan = (st) => (st ? `<span class="plan ${st.clase}">${esc(st.texto)}</span>` : '<span class="muted">—</span>');
+
+// Fechas reales de entrada y salida de cada etapa, según el historial
+function realesDe(p, hist) {
+  const cambios = hist.filter((h) => h.etapa_nueva).map((h) => ({ ...h, t: diaDe(h.created_at) })).sort((a, b) => a.t - b.t);
+  const r = {};
+  for (const c of cambios) {
+    if (c.etapa_anterior && r[c.etapa_anterior]) r[c.etapa_anterior].fin = c.t;
+    if (!r[c.etapa_nueva]) r[c.etapa_nueva] = { inicio: c.t, fin: null };
+  }
+  if (r[p.etapa]) r[p.etapa].fin = null; // etapa en curso
+  return r;
+}
+
+function ganttHtml(p, plan, reales) {
+  const hoy = diaDe(hoyISO());
+  const fechas = [hoy, diaDe(p.created_at), ...plan.filas.flatMap((f) => [f.inicio, f.fin])];
+  Object.values(reales).forEach((r) => { fechas.push(r.inicio); if (r.fin) fechas.push(r.fin); });
+  const min = sumaDias(new Date(Math.min(...fechas)), -7);
+  const max = sumaDias(new Date(Math.max(...fechas)), 7);
+  const pct = (d) => (((d - min) / (max - min)) * 100).toFixed(2);
+  const ancho = (a, b) => Math.max(0.6, ((b - a) / (max - min)) * 100).toFixed(2);
+
+  const meses = [];
+  for (let m = new Date(min.getFullYear(), min.getMonth() + 1, 1, 12); m < max; m = new Date(m.getFullYear(), m.getMonth() + 1, 1, 12)) meses.push(m);
+  const lineas = `${meses.map((m) => `<i class="g-mes" style="left:${pct(m)}%"></i>`).join('')}
+    <i class="g-hoy" style="left:${pct(hoy)}%"></i><i class="g-req" style="left:${pct(plan.req)}%"></i>`;
+
+  const filas = plan.filas.map((f) => {
+    const r = reales[f.etapa];
+    let real = '';
+    if (r) {
+      const fin = r.fin || hoy;
+      const clase = fin > f.fin ? 'tarde' : r.fin ? 'ok' : 'curso';
+      real = `<div class="g-bar real ${clase}" style="left:${pct(r.inicio)}%;width:${ancho(r.inicio, fin)}%" title="Real: ${fecha(isoDe(r.inicio))} – ${r.fin ? fecha(isoDe(r.fin)) : 'en curso'}"></div>`;
+    }
+    return `<div class="g-fila ${f.etapa === p.etapa ? 'actual' : ''}">
+      <div class="g-label"><b>${esc(nombreCorto(f.etapa))}</b><small>${fecha(isoDe(f.inicio))} – ${fecha(isoDe(f.fin))}</small></div>
+      <div class="g-track">${lineas}
+        <div class="g-bar plan ${f.despues ? 'post' : ''}" style="left:${pct(f.inicio)}%;width:${ancho(f.inicio, f.fin)}%" title="Plan: ${Math.round((f.fin - f.inicio) / DIA / 7 * 10) / 10} semanas"></div>
+        ${real}
+      </div></div>`;
+  }).join('');
+
+  return `<div class="gantt">
+    <div class="g-fila g-escala"><div class="g-label"></div><div class="g-track">
+      ${meses.map((m) => `<span style="left:${pct(m)}%">${m.toLocaleDateString('es-MX', { month: 'short', year: '2-digit' })}</span>`).join('')}
+    </div></div>
+    ${filas}
+  </div>
+  <div class="g-leyenda">
+    <span><i class="sw plan"></i>Plan</span><span><i class="sw ok"></i>Real a tiempo</span><span><i class="sw curso"></i>En curso</span>
+    <span><i class="sw tarde"></i>Real fuera de plan</span><span><i class="sw hoy"></i>Hoy</span><span><i class="sw req"></i>Gas requerido</span>
+  </div>`;
 }
 
 async function cargarYMostrar() {
@@ -222,17 +335,18 @@ async function vistaInicio() {
     const base = f.todos ? data : data.filter(enMiBandeja);
     const conteo = Object.fromEntries(ETAPAS.map((e) => [e, 0]));
     base.forEach((p) => { if (p.etapa in conteo) conteo[p.etapa]++; });
-    const vencidos = base.filter(vencido).length;
+    const atrasado = (p) => vencido(p) || estadoPlan(p)?.clase === 'mal';
+    const vencidos = base.filter(atrasado).length;
     const q = f.q.trim().toLowerCase();
     const lista = base.filter((p) =>
-      (!f.etapa || (f.etapa === 'vencidos' ? vencido(p) : p.etapa === f.etapa)) &&
+      (!f.etapa || (f.etapa === 'vencidos' ? atrasado(p) : p.etapa === f.etapa)) &&
       (!q || [p.folio, p.nombre, p.municipio, p.direccion].some((x) => (x || '').toLowerCase().includes(q))));
 
     $('#tituloBandeja').textContent = f.todos ? 'Todos los proyectos' : 'Mi bandeja';
     $('#kpis').innerHTML =
       `<button class="kpi ${!f.etapa ? 'activo' : ''}" data-etapa=""><b>${base.length}</b><span>Total</span></button>` +
       ETAPAS.map((e) => `<button class="kpi k${num(e)} ${f.etapa === e ? 'activo' : ''}" data-etapa="${esc(e)}"><b>${conteo[e]}</b><span>${esc(e)}</span></button>`).join('') +
-      `<button class="kpi alerta ${f.etapa === 'vencidos' ? 'activo' : ''}" data-etapa="vencidos"><b>${vencidos}</b><span>Compromiso vencido</span></button>`;
+      `<button class="kpi alerta ${f.etapa === 'vencidos' ? 'activo' : ''}" data-etapa="vencidos"><b>${vencidos}</b><span>Atrasados</span></button>`;
     $('#lista').innerHTML = lista.length ? tablaProyectos(lista) : '<p class="vacio">No hay proyectos en esta vista.</p>';
 
     $$('.kpi', v).forEach((b) => (b.onclick = () => { f.etapa = f.etapa === b.dataset.etapa ? '' : b.dataset.etapa; pintar(); }));
@@ -247,7 +361,7 @@ async function vistaInicio() {
 
 function tablaProyectos(lista) {
   return `<div class="tabla-wrap"><table class="tabla">
-    <thead><tr><th>Folio</th><th>Proyecto</th><th>Municipio</th><th>Segmento</th><th>Etapa</th><th>Proyectista</th><th>Compromiso</th></tr></thead>
+    <thead><tr><th>Folio</th><th>Proyecto</th><th>Municipio</th><th>Segmento</th><th>Etapa</th><th>Proyectista</th><th>Gas requerido</th><th>Plan</th></tr></thead>
     <tbody>${lista.map((p) => `
       <tr data-id="${p.id}">
         <td><b>${esc(p.folio)}</b></td>
@@ -256,7 +370,8 @@ function tablaProyectos(lista) {
         <td>${esc(p.segmento)}${p.segmento === 'Industrial' ? ' · ' + esc(p.material) : ''}</td>
         <td>${badgeEtapa(p.etapa)}</td>
         <td>${p.proyectista_id ? esc(nombreDe(p.proyectista_id)) : '<span class="muted">—</span>'}</td>
-        <td class="${vencido(p) ? 'vencido' : ''}">${fecha(p.fecha_compromiso)}</td>
+        <td>${fecha(p.fecha_requerida_gas)}</td>
+        <td>${pillPlan(estadoPlan(p))}</td>
       </tr>`).join('')}
     </tbody></table></div>`;
 }
@@ -279,7 +394,8 @@ function vistaNueva() {
       <label>Segmento *<select name="segmento" required><option value="">Selecciona…</option>
         ${SEGMENTOS.map((s) => `<option>${s}</option>`).join('')}</select></label>
       <label id="lblMaterial" hidden>Material *<select name="material">${MATERIALES.map((m) => `<option>${m}</option>`).join('')}</select></label>
-      <label>Fecha requerida<input type="date" name="fecha_compromiso"></label>
+      ${S.ganttListo ? `<label>Fecha requerida de gas *<input type="date" name="fecha_requerida_gas" required min="${hoyISO()}"></label>` : ''}
+      <div class="full" id="viabilidad"></div>
       <label class="full">Dirección<input name="direccion" maxlength="300"></label>
       <label class="full">Descripción / alcance<textarea name="descripcion" rows="3"></textarea></label>
       <div class="full folio">Folio: <b id="folioPrev">—</b> <small class="muted">(el consecutivo se asigna al enviar)</small></div>
@@ -336,7 +452,19 @@ function vistaNueva() {
     $('#folioPrev').textContent = mun && f.segmento
       ? `${mun.clave}${f.segmento[0]}${f.material[0]}${String(new Date().getFullYear()).slice(-2)}###` : '—';
 
-    $('#btnEnviar').disabled = !(f.nombre?.trim() && f.municipio && f.segmento && listos === oblig.length);
+    // Viabilidad de la fecha requerida de gas
+    const viab = $('#viabilidad');
+    if (f.segmento && f.fecha_requerida_gas && S.tiempos.length) {
+      const sem = totalSemanas(f.segmento);
+      const posible = sumaDias(diaDe(hoyISO()), Math.round(sem * 7));
+      const req = diaDe(f.fecha_requerida_gas);
+      const dif = Math.round((req - posible) / DIA / 7 * 10) / 10;
+      viab.innerHTML = dif >= 0
+        ? `<div class="nota ok">Con los tiempos de ${esc(f.segmento)} (${sem} semanas) la fecha sí alcanza: quedan <b>${dif} semanas de holgura</b>. El proyecto debe arrancar a más tardar el <b>${fecha(isoDe(sumaDias(req, -Math.round(sem * 7))))}</b>.</div>`
+        : `<div class="aviso">No alcanza: con los tiempos de ${esc(f.segmento)} se necesitan ${sem} semanas y faltan <b>${-dif}</b>. La fecha más próxima posible es el <b>${fecha(isoDe(posible))}</b>. Puedes cambiarla o enviarla así y el Líder decidirá si acorta etapas.</div>`;
+    } else viab.innerHTML = '';
+
+    $('#btnEnviar').disabled = !(f.nombre?.trim() && f.municipio && f.segmento && (f.fecha_requerida_gas || !S.ganttListo) && listos === oblig.length);
   };
 
   frm.oninput = actualizar;
@@ -351,7 +479,7 @@ function vistaNueva() {
       const { data: p, error } = await sb.from('proyectos').insert({
         nombre: f.nombre.trim(), municipio: f.municipio, segmento: f.segmento, material: f.material,
         direccion: f.direccion?.trim() || null, descripcion: f.descripcion?.trim() || null,
-        fecha_compromiso: f.fecha_compromiso || null,
+        ...(S.ganttListo ? { fecha_requerida_gas: f.fecha_requerida_gas || null } : {}),
       }).select().single();
       if (error) throw error;
 
@@ -417,6 +545,8 @@ async function vistaDetalle(id) {
   const p = rp.data;
   if (!p) { v.innerHTML = '<p class="vacio">Proyecto no encontrado. <a href="#/inicio">Volver</a></p>'; return; }
   const docs = rd.data, hist = rh.data, lics = rl.data;
+  const plan = planDe(p);
+  const estPlan = estadoPlan(p, plan);
 
   const urls = {};
   if (docs.length) {
@@ -473,6 +603,14 @@ async function vistaDetalle(id) {
       <div><h1>${esc(p.folio)} · ${esc(p.nombre)}</h1><div>${badgeEtapa(p.etapa)} ${p.bloqueo ? '<span class="bloq">⚠ Bloqueado</span>' : ''}</div></div>
     </div>
     <ol class="stepper">${stepper}</ol>
+    <section class="card">
+      <div class="card-h"><h2>Cronograma (Gantt)</h2>${pillPlan(estPlan)}</div>
+      ${!S.ganttListo ? '<p class="muted">Falta ejecutar <b>supabase/002_gantt.sql</b> en Supabase para activar el Gantt.</p>'
+        : !plan ? `<p class="muted">Captura la <b>fecha requerida de gas</b> en Seguimiento para calcular el cronograma.</p>`
+        : `<p class="g-resumen">Gas requerido: <b>${fecha(p.fecha_requerida_gas)}</b> · Debía arrancar: <b>${fecha(isoDe(plan.inicioPlan))}</b> ·
+            ${plan.holgura >= 0 ? `Holgura al recibir la solicitud: <b>${Math.round(plan.holgura / 7 * 10) / 10} semanas</b>` : `<span class="vencido">Llegó ${Math.round(-plan.holgura / 7 * 10) / 10} semanas tarde para los tiempos estándar</span>`}</p>
+           ${ganttHtml(p, plan, realesDe(p, hist))}`}
+    </section>
     ${n === 0 ? `<div class="aviso">Devuelta a Comercial. Revisa el historial para ver el motivo, corrige y reenvía.</div>` : ''}
 
     <div class="cols">
@@ -533,6 +671,7 @@ async function vistaDetalle(id) {
         <section class="card">
           <h2>Seguimiento</h2>
           <form id="frmSeg" class="grid mini">
+            ${S.ganttListo ? `<label>Fecha requerida de gas<input type="date" name="fecha_requerida_gas" value="${esc(p.fecha_requerida_gas || '')}" ${editable ? '' : 'disabled'}></label>` : ''}
             <label>Fecha compromiso<input type="date" name="fecha_compromiso" value="${esc(p.fecha_compromiso || '')}" ${editable ? '' : 'disabled'}></label>
             <label class="full">Bloqueo actual<input name="bloqueo" value="${esc(p.bloqueo || '')}" placeholder="Ninguno" ${editable ? '' : 'disabled'}></label>
             <label class="full">Siguiente acción<input name="siguiente_accion" value="${esc(p.siguiente_accion || '')}" ${editable ? '' : 'disabled'}></label>
@@ -636,6 +775,7 @@ async function vistaDetalle(id) {
     const fd = Object.fromEntries(new FormData(frmSeg));
     const { error } = await sb.from('proyectos').update({
       fecha_compromiso: fd.fecha_compromiso || null,
+      ...(S.ganttListo ? { fecha_requerida_gas: fd.fecha_requerida_gas || null } : {}),
       bloqueo: fd.bloqueo.trim() || null,
       siguiente_accion: fd.siguiente_accion.trim() || null,
     }).eq('id', p.id);
@@ -742,6 +882,16 @@ async function vistaAdmin() {
     </section>
 
     <section class="card">
+      <h2>Tiempos por etapa (semanas)</h2>
+      ${S.ganttListo ? `<p class="muted chico">El Gantt parte de la fecha requerida de gas y resta estas semanas hacia atrás. «Cierre y as-built» se cuenta después de la puesta en servicio.</p>
+      <div class="tabla-wrap"><table class="tabla compacta"><thead><tr><th>Etapa</th>${SEGMENTOS.map((s) => `<th>${s}</th>`).join('')}</tr></thead><tbody>
+      ${[...ETAPAS_ANTES, ...ETAPAS_DESPUES].map(etapaPorNum).filter(Boolean).map((e) => `<tr><td>${esc(e)}</td>${SEGMENTOS.map((s) =>
+        `<td><input type="number" class="corto" min="0" step="0.5" data-tseg="${s}" data-tetapa="${esc(e)}" value="${semanasDe(s, e)}"></td>`).join('')}</tr>`).join('')}
+      <tr><td><b>Total hasta el gas</b></td>${SEGMENTOS.map((s) => `<td><b>${totalSemanas(s)}</b></td>`).join('')}</tr>
+      </tbody></table></div>` : '<p class="muted">Ejecuta <b>supabase/002_gantt.sql</b> en Supabase para activar esta sección.</p>'}
+    </section>
+
+    <section class="card">
       <h2>Municipios</h2>
       <p class="muted chico">La clave es el inicio del folio. No uses claves que empiecen igual que otra seguida de R, C o I.</p>
       <div class="chips">${S.municipios.map((m) => `<span class="chip">${esc(m.nombre)} <b>${esc(m.clave)}</b></span>`).join('')}</div>
@@ -780,6 +930,12 @@ async function vistaAdmin() {
     toast('Documento agregado');
     vistaAdmin();
   };
+  $$('[data-tseg]', v).forEach((i) => (i.onchange = async () => {
+    const { error } = await sb.from('config_tiempos').upsert({ segmento: i.dataset.tseg, etapa: i.dataset.tetapa, semanas: Number(i.value) || 0 });
+    if (error) return fallo(error);
+    toast('Tiempo actualizado');
+    vistaAdmin();
+  }));
   $('#frmMun').onsubmit = async (ev) => {
     ev.preventDefault();
     if (!ev.target.reportValidity()) return;

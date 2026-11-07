@@ -17,6 +17,7 @@ Plataforma web para dar de alta solicitudes de proyectos, subir su expediente y 
 | Expediente | Archivos por documento y etapa, en un bucket privado; enlaces de descarga temporales. |
 | Licencias | Tipo, dependencia, estatus, fechas de ingreso y vencimiento. |
 | Seguimiento | Fecha compromiso (se marca en rojo si está vencida), bloqueo actual y siguiente acción. |
+| Gantt | Parte de la **fecha requerida de gas** y calcula hacia atrás cuándo debe empezar y terminar cada etapa, según las semanas por segmento (editables en Administración). Muestra plan contra real, línea de hoy y de gas requerido, y marca cada proyecto como A tiempo, En riesgo o Atrasado. Al capturar la solicitud avisa si la fecha no alcanza y propone la más próxima posible. |
 | Historial | Se registra solo: creación, cambios de etapa, asignaciones y comentarios, con usuario y fecha. |
 | Administración | Roles y usuarios activos, documentos requeridos por etapa/segmento/material, municipios y claves. |
 
@@ -51,6 +52,9 @@ export const SUPABASE_ANON_KEY = 'eyJhbGciOi...';
 
 ### 5. Ajustar catálogos
 En **Administración → Documentos requeridos** reemplaza los documentos de ejemplo por tu lista real (los 23 de Config_Documentos), indicando etapa, segmento, material y si es obligatorio.
+
+## Actualizar una instalación existente
+Si ya ejecutaste `schema.sql` antes de que existiera el Gantt, ejecuta una vez `supabase/002_gantt.sql` en el SQL Editor de Supabase.
 
 ## Probar en tu computadora (opcional)
 ```bash
