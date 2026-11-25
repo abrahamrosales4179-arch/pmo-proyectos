@@ -214,7 +214,7 @@ insert into public.config_actividades (etapa, orden, nombre, area, dias, entrega
   ('2. Ingeniería y factibilidad', 40, 'Generar formato de factibilidad técnico-económica', 'Proyectos', 1, null, false),
   ('2. Ingeniería y factibilidad', 50, 'Aprobación de factibilidad', 'Ventas', 2, 'Si no se aprueba: FIN (Cancelado)', true),
   -- 3. Carpeta técnica
-  ('3. Carpeta técnica', 10, 'Aprobación de ficha de inversión y generación de Elemento PEP', 'Inversiones', 7, 'Notificación de creación de PEP a Construcción e Instalaciones', false),
+  ('3. Carpeta técnica', 10, 'Gestionar con Inversiones la aprobación de la ficha y el Elemento PEP', 'Proyectos / Inversiones', 7, 'El proyectista registra el PEP en la app · Notificación de creación de PEP a Construcción e Instalaciones', false),
   ('3. Carpeta técnica', 20, 'Trámite de dictamen de diseño', 'Proyectos', 15, 'Memoria de cálculo de espesores · MTD', false),
   ('3. Carpeta técnica', 30, 'Generar expediente de permisos', 'Proyectos', 10, 'Cronograma de obra · Planos de movilidad · Presupuesto de obra civil · Planos de permisos · MTD permisos · Dictamen de diseño (Zapopan)', false),
   ('3. Carpeta técnica', 40, 'Revisión del DRO', 'DRO', 15, null, false),

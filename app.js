@@ -4,7 +4,7 @@ import { SUPABASE_URL, SUPABASE_ANON_KEY, NOMBRE_APP, ETAPAS } from './config.js
 // ---------------------------------------------------------------------
 // Constantes y estado
 // ---------------------------------------------------------------------
-const ROLES = ['Administrador', 'Consulta', 'Comercial', 'Líder', 'Proyectista', 'Inversiones', 'Permisos', 'Construcción', 'Sin rol'];
+const ROLES = ['Administrador', 'Consulta', 'Comercial', 'Líder', 'Proyectista', 'Permisos', 'Construcción', 'Sin rol'];
 const ESTATUS_ACT = ['Pendiente', 'En proceso', 'Hecha', 'No aplica'];
 const SEGMENTOS = ['Residencial', 'Comercial', 'Industrial'];
 const MATERIALES = ['Polietileno', 'Acero'];
@@ -14,7 +14,7 @@ const BUCKET = 'expedientes';
 const configurado = !SUPABASE_URL.includes('TU-PROYECTO') && !SUPABASE_ANON_KEY.includes('PEGA-AQUI');
 const sb = configurado ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 const app = document.getElementById('app');
-const S = { session: null, perfil: null, municipios: [], configDocs: [], perfiles: [], tiempos: [], ganttListo: false, actividades: [], flujoListo: false };
+const S = { session: null, perfil: null, municipios: [], configDocs: [], perfiles: [], tiempos: [], ganttListo: false, actividades: [], flujoListo: false, rendimientos: [], constListo: false };
 
 // ---------------------------------------------------------------------
 // Utilidades
@@ -113,6 +113,10 @@ async function cargarCatalogos() {
   const act = await sb.from('config_actividades').select('*').order('orden');
   S.flujoListo = !act.error;
   S.actividades = act.data || [];
+  // Rendimientos para estimar construcción (supabase/004_construccion.sql)
+  const rend = await sb.from('config_rendimientos').select('*').order('orden');
+  S.constListo = !rend.error;
+  S.rendimientos = rend.data || [];
 }
 
 // ---------------------------------------------------------------------
@@ -129,11 +133,32 @@ function diaDe(x) {
 const sumaDias = (d, n) => new Date(d.getTime() + n * DIA);
 const isoDe = (d) => d.toLocaleDateString('en-CA');
 const semanasDe = (seg, etapa) => Number(S.tiempos.find((t) => t.segmento === seg && t.etapa === etapa)?.semanas ?? 0);
+// ---------------------------------------------------------------------
+// Estimación de construcción por tramos (material, diámetro, longitud)
+// ---------------------------------------------------------------------
+const diametrosDe = (mat) => S.rendimientos.filter((r) => r.material === mat).sort((a, b) => a.orden - b.orden);
+const rendimiento = (mat, dia) => Number(S.rendimientos.find((r) => r.material === mat && r.diametro === dia)?.metros_dia || 0);
+function calcConst(d) {
+  let metros = 0, tendido = 0;
+  for (const t of d.tramos || []) {
+    const r = rendimiento(t.material, t.diametro), l = Number(t.longitud) || 0;
+    if (r && l > 0) { metros += l; tendido += l / r; }
+  }
+  const cuadrillas = Math.max(1, Number(d.cuadrillas) || 1);
+  const diasTendido = Math.ceil((tendido / cuadrillas) * 10) / 10;
+  const dias = Math.ceil(diasTendido + (Number(d.dias_extra) || 0));
+  const semanas = dias ? Math.ceil((dias / (Number(d.dias_semana) || 5)) * 2) / 2 : 0; // redondeo a media semana hacia arriba
+  return { metros, diasTendido, dias, semanas };
+}
+const puedeEstimarConst = () => ['Construcción', 'Líder', 'Administrador'].includes(rol());
+
+// Semanas de una etapa para un proyecto: en Construcción usa la estimación del supervisor si existe
+const semanasPlan = (p, etapa) => (num(etapa) === 5 && p.const_semanas != null ? Number(p.const_semanas) : semanasDe(p.segmento, etapa));
 const totalSemanas = (seg) => ETAPAS_ANTES.reduce((a, n) => a + semanasDe(seg, etapaPorNum(n)), 0);
 const nombreCorto = (e) => e.replace(/^\d+\.\s*/, '');
 const diasFlujo = (etapa) => {
-  // El PEP de Inversiones corre en paralelo al dictamen de diseño: no se suma
-  const d = actividadesDe(etapa).filter((a) => a.area !== 'Inversiones').reduce((t, a) => t + Number(a.dias || 0), 0);
+  // El PEP (gestión con Inversiones) corre en paralelo al dictamen de diseño: no se suma
+  const d = actividadesDe(etapa).filter((a) => !/Inversiones/.test(a.area)).reduce((t, a) => t + Number(a.dias || 0), 0);
   return d ? `${d} día${d === 1 ? '' : 's'} hábil${d === 1 ? '' : 'es'} ≈ ${Math.round(d / 5 * 10) / 10} sem` : '—';
 };
 
@@ -145,7 +170,7 @@ function planDe(p) {
   for (const n of [...ETAPAS_ANTES].reverse()) {
     const etapa = etapaPorNum(n);
     if (!etapa) continue;
-    const inicio = sumaDias(fin, -Math.round(semanasDe(p.segmento, etapa) * 7));
+    const inicio = sumaDias(fin, -Math.round(semanasPlan(p, etapa) * 7));
     filas.unshift({ n, etapa, inicio, fin });
     fin = inicio;
   }
@@ -153,7 +178,7 @@ function planDe(p) {
   for (const n of ETAPAS_DESPUES) {
     const etapa = etapaPorNum(n);
     if (!etapa) continue;
-    const f = sumaDias(ini, Math.round(semanasDe(p.segmento, etapa) * 7));
+    const f = sumaDias(ini, Math.round(semanasPlan(p, etapa) * 7));
     filas.push({ n, etapa, inicio: ini, fin: f, despues: true });
     ini = f;
   }
@@ -319,8 +344,7 @@ function enMiBandeja(p) {
     case 'Consulta': return true;
     case 'Comercial': return p.solicitante_id === me;
     case 'Líder': return n === 1;
-    case 'Proyectista': return (n === 2 || n === 3) && p.proyectista_id === me;
-    case 'Inversiones': return n >= 3 && n < 8 && !p.elemento_pep; // tras aprobar la factibilidad
+    case 'Proyectista': return p.proyectista_id === me && (n === 2 || n === 3 || (n === 4 && S.flujoListo && !p.elemento_pep));
     case 'Permisos': return n === 4;
     case 'Construcción': return n >= 5 && n <= 7;
     default: return false;
@@ -651,7 +675,7 @@ function accionesDe(p) {
     out.push({ id: 'avanzar', label: 'Enviar a Construcción', destino: etapaPorNum(5), revisaDocs: p.etapa, revisaLic: true, revisaPep: flujo, revisaAct: p.etapa });
   if (n >= 5 && n <= 7 && (adm || r === 'Construcción'))
     out.push({ id: 'avanzar', label: `Avanzar a «${siguienteEtapa(p.etapa)}»`, destino: siguienteEtapa(p.etapa), revisaDocs: p.etapa, revisaAct: p.etapa });
-  if (flujo && n >= 3 && n < 8 && (adm || r === 'Inversiones'))
+  if (flujo && n >= 3 && n < 8 && (adm || (r === 'Proyectista' && p.proyectista_id === me)))
     out.push({ id: 'pep', label: p.elemento_pep ? 'Corregir Elemento PEP' : 'Registrar Elemento PEP', sec: !!p.elemento_pep });
   if (adm) out.push({ id: 'mover', label: 'Mover a otra etapa', sec: true });
   if (puedeEditar()) out.push({ id: 'comentar', label: 'Agregar comentario', sec: true });
@@ -747,7 +771,7 @@ async function vistaDetalle(id) {
     ${n === 2 && S.flujoListo ? (p.factibilidad === 'En revisión'
       ? `<div class="aviso">Factibilidad técnico-económica <b>en revisión por Ventas</b> (tiempo objetivo: 2 días). Ventas la aprueba, pide cambios o la rechaza.</div>`
       : `<div class="nota ok">Ingeniería y factibilidad: el proyectista elabora plano, modelo hidráulico, ficha de inversión y formato de factibilidad; al terminar la envía a Ventas.</div>`) : ''}
-    ${S.flujoListo && n >= 3 && n < 8 && !p.elemento_pep ? `<div class="aviso">Falta el <b>Elemento PEP</b> (lo registra Inversiones). Sin él no se puede entrar a Construcción.</div>` : ''}
+    ${S.flujoListo && n >= 3 && n < 8 && !p.elemento_pep ? `<div class="aviso">Falta el <b>Elemento PEP</b> (lo registra el proyectista tras gestionarlo con Inversiones). Sin él no se puede entrar a Construcción.</div>` : ''}
 
     <div class="cols">
       <div class="col">
@@ -756,6 +780,8 @@ async function vistaDetalle(id) {
           <div id="accionForm"></div></section>` : ''}
 
         ${S.flujoListo ? `<section class="card" id="cardActividades"></section>` : ''}
+
+        ${S.constListo && n >= 1 && n <= 8 ? '<section class="card" id="cardConst"></section>' : ''}
 
         <section class="card">
           <div class="card-h"><h2>Expediente</h2></div>
@@ -898,7 +924,7 @@ async function vistaDetalle(id) {
       <h3>${esc(a.label)}</h3>
       ${pendDocs.length ? `<div class="aviso">Faltan documentos obligatorios: <b>${pendDocs.map((d) => esc(d.nombre)).join(', ')}</b></div>` : ''}
       ${pendLic.length ? `<div class="aviso">Licencias sin aprobar: <b>${pendLic.map((l) => esc(l.tipo)).join(', ')}</b></div>` : ''}
-      ${pendPep ? '<div class="aviso">Falta el <b>Elemento PEP</b>: pide a Inversiones que lo registre.</div>' : ''}
+      ${pendPep ? '<div class="aviso">Falta el <b>Elemento PEP</b>: pide al proyectista que lo registre (lo gestiona con Inversiones).</div>' : ''}
       ${pendAct.length ? `<div class="aviso">Actividades del flujograma sin terminar: <b>${pendAct.map((x) => esc(x.nombre)).join(', ')}</b></div>` : ''}
       ${bloqueado ? '' : extra}
       ${bloqueado ? '' : `<label>${etiquetaCom}
@@ -959,6 +985,119 @@ async function vistaDetalle(id) {
     toast('Archivo eliminado');
     recargar();
   }));
+
+  // --- Tiempo estimado de construcción (supervisores)
+  const cardConst = $('#cardConst');
+  const pintarConst = (editando = false) => {
+    if (!cardConst) return;
+    const etapaC = etapaPorNum(5);
+    const estandar = semanasDe(p.segmento, etapaC);
+    const tiene = p.const_semanas != null;
+    const det = p.const_detalle || {};
+    const resumenCalc = tiene && p.const_metodo === 'Cálculo' ? (() => {
+      const c = calcConst(det);
+      return `<small class="muted">${c.metros.toLocaleString('es-MX')} m en ${(det.tramos || []).length} tramo(s) · ${det.cuadrillas || 1} cuadrilla(s) · tendido ${c.diasTendido} días + ${Number(det.dias_extra) || 0} adicionales = ${c.dias} días (${det.dias_semana || 5} días/semana)</small>`;
+    })() : '';
+    const encabezado = `<div class="card-h"><h2>Tiempo de construcción</h2>
+      ${tiene ? `<span class="pill ok">${Number(p.const_semanas)} sem · ${esc(p.const_metodo || '')}</span>` : `<span class="pill">Estándar: ${estandar} sem</span>`}</div>`;
+    if (!editando) {
+      cardConst.innerHTML = encabezado + (tiene
+        ? `<p>Estimado por supervisión: <b>${Number(p.const_semanas)} semanas</b> (estándar ${esc(p.segmento)}: ${estandar}; ${Number(p.const_semanas) - estandar >= 0 ? '+' : ''}${Math.round((Number(p.const_semanas) - estandar) * 10) / 10} sem). El Gantt ya usa este tiempo.</p>
+           ${resumenCalc ? `<p>${resumenCalc}</p>` : ''}${p.const_nota ? `<p class="pre chico">${esc(p.const_nota)}</p>` : ''}`
+        : `<p class="muted chico">El Gantt usa el tiempo estándar del segmento (${estandar} semanas). El supervisor de obra puede afinarlo con su estimación o con un cálculo por diámetro, material y longitud.</p>`) +
+        (puedeEstimarConst() && n < 8 ? `<div class="botones"><button class="btn sec chico" id="btnConst">${tiene ? 'Actualizar estimación' : 'Estimar tiempo de construcción'}</button></div>` : '');
+      const b = $('#btnConst');
+      if (b) b.onclick = () => pintarConst(true);
+      return;
+    }
+
+    // Formulario
+    const est = {
+      metodo: p.const_metodo || 'Cálculo',
+      tramos: (det.tramos && det.tramos.length ? det.tramos : [{ material: p.material, diametro: diametrosDe(p.material)[0]?.diametro || '', longitud: '' }]).map((t) => ({ ...t })),
+      cuadrillas: det.cuadrillas || 1, dias_extra: det.dias_extra ?? 0, dias_semana: det.dias_semana || 5,
+      manual: p.const_metodo === 'Manual' ? Number(p.const_semanas) : '',
+      nota: p.const_nota || '',
+    };
+    const filaTramo = (t, i) => {
+      const r = rendimiento(t.material, t.diametro), l = Number(t.longitud) || 0;
+      return `<tr>
+        <td><select data-t="${i}" data-c="material">${MATERIALES.map((m) => `<option ${m === t.material ? 'selected' : ''}>${m}</option>`).join('')}</select></td>
+        <td><select data-t="${i}" data-c="diametro">${diametrosDe(t.material).map((d) => `<option ${d.diametro === t.diametro ? 'selected' : ''}>${esc(d.diametro)}</option>`).join('')}</select></td>
+        <td><input type="number" min="0" step="1" data-t="${i}" data-c="longitud" value="${esc(t.longitud)}" placeholder="m"></td>
+        <td class="muted">${r || '—'}</td>
+        <td>${r && l ? Math.round((l / r) * 10) / 10 : '—'}</td>
+        <td>${est.tramos.length > 1 ? `<button type="button" class="link rojo" data-quitar="${i}">✕</button>` : ''}</td>
+      </tr>`;
+    };
+    const dibujar = () => {
+      const c = calcConst(est);
+      cardConst.innerHTML = encabezado + `<form id="frmConst" class="const">
+        <div class="seg-ctrl">
+          <label><input type="radio" name="metodo" value="Cálculo" ${est.metodo === 'Cálculo' ? 'checked' : ''}> Calcular por tramos</label>
+          <label><input type="radio" name="metodo" value="Manual" ${est.metodo === 'Manual' ? 'checked' : ''}> Capturar manualmente</label>
+        </div>
+        ${est.metodo === 'Cálculo' ? `
+          <div class="tabla-wrap"><table class="tabla compacta"><thead><tr><th>Material</th><th>Diámetro</th><th>Longitud (m)</th><th>m/día</th><th>Días</th><th></th></tr></thead>
+            <tbody>${est.tramos.map(filaTramo).join('')}</tbody></table></div>
+          <button type="button" class="link" id="btnTramo">+ Agregar tramo</button>
+          <div class="grid mini">
+            <label>Cuadrillas<input type="number" min="1" step="1" name="cuadrillas" value="${esc(est.cuadrillas)}"></label>
+            <label>Días laborables por semana<select name="dias_semana">${[5, 6].map((x) => `<option ${x === Number(est.dias_semana) ? 'selected' : ''}>${x}</option>`).join('')}</select></label>
+            <label class="full">Días adicionales <small class="muted">(preparación, sondeos, cruces, interconexión, pruebas)</small><input type="number" min="0" step="0.5" name="dias_extra" value="${esc(est.dias_extra)}"></label>
+          </div>
+          <div class="nota ok">Tendido: <b>${c.metros.toLocaleString('es-MX')} m</b> en <b>${c.diasTendido} días</b> · Total: <b>${c.dias} días</b> → <b>${c.semanas} semanas</b></div>
+          <p class="muted chico">Rendimientos en metros por día por cuadrilla (se ajustan en Administración).</p>`
+        : `<div class="grid mini"><label>Semanas estimadas *<input type="number" min="0.5" step="0.5" name="manual" value="${esc(est.manual)}" required></label></div>`}
+        <label class="full">Nota / supuestos<textarea name="nota" rows="2" placeholder="Ej. cruce de avenida, horario nocturno, permisos de cierre de calle…">${esc(est.nota)}</textarea></label>
+        <div class="botones">
+          <button type="button" class="btn sec chico" id="btnConstCancel">Cancelar</button>
+          ${tiene ? '<button type="button" class="btn sec chico" id="btnConstQuitar">Usar el estándar</button>' : ''}
+          <button class="btn chico">Guardar estimación</button>
+        </div></form>`;
+
+      const f = $('#frmConst');
+      $$('input[name="metodo"]', f).forEach((r) => (r.onchange = () => { est.metodo = r.value; dibujar(); }));
+      $$('[data-t]', f).forEach((el) => (el.onchange = el.oninput = (ev) => {
+        const t = est.tramos[Number(el.dataset.t)];
+        t[el.dataset.c] = el.value;
+        if (el.dataset.c === 'material') t.diametro = diametrosDe(t.material)[0]?.diametro || '';
+        if (ev.type === 'change') dibujar();
+      }));
+      $$('[data-quitar]', f).forEach((b) => (b.onclick = () => { est.tramos.splice(Number(b.dataset.quitar), 1); dibujar(); }));
+      const bt = $('#btnTramo'); if (bt) bt.onclick = () => { const u = est.tramos[est.tramos.length - 1]; est.tramos.push({ material: u?.material || p.material, diametro: u?.diametro || '', longitud: '' }); dibujar(); };
+      ['cuadrillas', 'dias_extra', 'dias_semana', 'manual', 'nota'].forEach((k) => { const el = f.elements[k]; if (el) el.onchange = () => { est[k] = el.value; if (k !== 'nota' && k !== 'manual') dibujar(); }; });
+      $('#btnConstCancel').onclick = () => pintarConst(false);
+      const guardar = async (cambios) => {
+        const r = await sb.from('proyectos').update(cambios).eq('id', p.id).select('id');
+        if (r.error) return fallo(r.error);
+        if (!r.data?.length) return fallo(new Error('No tienes permiso para modificar este proyecto'));
+        toast('Estimación guardada');
+        recargar();
+      };
+      const q = $('#btnConstQuitar');
+      if (q) q.onclick = () => { if (confirm('¿Quitar la estimación y volver al tiempo estándar del segmento?')) guardar({ const_semanas: null }); };
+      f.onsubmit = (ev) => {
+        ev.preventDefault();
+        est.nota = f.elements.nota.value;
+        if (est.metodo === 'Manual') {
+          est.manual = f.elements.manual.value;
+          const sem = Number(est.manual);
+          if (!(sem > 0)) return toast('Captura las semanas estimadas', 'error');
+          return guardar({ const_semanas: sem, const_metodo: 'Manual', const_detalle: null, const_nota: est.nota.trim() || null });
+        }
+        const c = calcConst(est);
+        if (!c.metros) return toast('Captura al menos un tramo con longitud', 'error');
+        const detalle = {
+          tramos: est.tramos.filter((t) => Number(t.longitud) > 0).map((t) => ({ material: t.material, diametro: t.diametro, longitud: Number(t.longitud), metros_dia: rendimiento(t.material, t.diametro) })),
+          cuadrillas: Number(est.cuadrillas) || 1, dias_extra: Number(est.dias_extra) || 0, dias_semana: Number(est.dias_semana) || 5,
+        };
+        guardar({ const_semanas: c.semanas, const_metodo: 'Cálculo', const_detalle: detalle, const_nota: est.nota.trim() || null });
+      };
+    };
+    dibujar();
+  };
+  pintarConst();
 
   // --- Seguimiento
   const frmSeg = $('#frmSeg');
@@ -1084,6 +1223,26 @@ async function vistaAdmin() {
       </tbody></table></div>` : '<p class="muted">Ejecuta <b>supabase/002_gantt.sql</b> en Supabase para activar esta sección.</p>'}
     </section>
 
+    ${S.constListo ? `<section class="card">
+      <h2>Rendimientos de instalación</h2>
+      <p class="muted chico">Metros por día por cuadrilla. Los usa el cálculo de tiempo de construcción (material, diámetro y longitud). Los valores iniciales son de ejemplo: valídalos con los supervisores.</p>
+      <div class="tabla-wrap"><table class="tabla compacta"><thead><tr><th>Material</th><th>Diámetro</th><th>m/día</th><th>Orden</th><th></th></tr></thead><tbody>
+      ${[...S.rendimientos].sort((a, b) => a.material.localeCompare(b.material) || a.orden - b.orden).map((r) => `<tr>
+        <td>${esc(r.material)}</td><td>${esc(r.diametro)}</td>
+        <td><input type="number" class="corto" min="0.1" step="0.5" data-rend="${esc(r.material)}|${esc(r.diametro)}" data-campo="metros_dia" value="${Number(r.metros_dia)}"></td>
+        <td><input type="number" class="corto" data-rend="${esc(r.material)}|${esc(r.diametro)}" data-campo="orden" value="${r.orden}"></td>
+        <td><button class="link rojo" data-borrarrend="${esc(r.material)}|${esc(r.diametro)}">✕</button></td>
+      </tr>`).join('')}
+      </tbody></table></div>
+      <form id="frmRend" class="grid mini">
+        <label>Material<select name="material">${MATERIALES.map((m) => `<option>${m}</option>`).join('')}</select></label>
+        <label>Diámetro *<input name="diametro" required placeholder='Ej. 2" (63 mm)'></label>
+        <label>m/día *<input type="number" name="metros_dia" min="0.1" step="0.5" required></label>
+        <label>Orden<input type="number" name="orden" value="100"></label>
+        <div class="full"><button class="btn sec chico">Agregar diámetro</button></div>
+      </form>
+    </section>` : ''}
+
     <section class="card">
       <h2>Municipios</h2>
       <p class="muted chico">La clave es el inicio del folio. No uses claves que empiecen igual que otra seguida de R, C o I.</p>
@@ -1129,6 +1288,31 @@ async function vistaAdmin() {
     toast('Tiempo actualizado');
     vistaAdmin();
   }));
+  const llaveRend = (k) => { const i = k.indexOf('|'); return [k.slice(0, i), k.slice(i + 1)]; };
+  $$('[data-rend]', v).forEach((i) => (i.onchange = async () => {
+    const [material, diametro] = llaveRend(i.dataset.rend);
+    const { error } = await sb.from('config_rendimientos').update({ [i.dataset.campo]: Number(i.value) || 0 }).eq('material', material).eq('diametro', diametro);
+    if (error) return fallo(error);
+    toast('Rendimiento actualizado');
+    await cargarCatalogos();
+  }));
+  $$('[data-borrarrend]', v).forEach((b) => (b.onclick = async () => {
+    const [material, diametro] = llaveRend(b.dataset.borrarrend);
+    if (!confirm(`¿Eliminar ${material} ${diametro}?`)) return;
+    const { error } = await sb.from('config_rendimientos').delete().eq('material', material).eq('diametro', diametro);
+    if (error) return fallo(error);
+    vistaAdmin();
+  }));
+  const frmRend = $('#frmRend');
+  if (frmRend) frmRend.onsubmit = async (ev) => {
+    ev.preventDefault();
+    if (!frmRend.reportValidity()) return;
+    const fd = Object.fromEntries(new FormData(frmRend));
+    const { error } = await sb.from('config_rendimientos').insert({ material: fd.material, diametro: fd.diametro.trim(), metros_dia: Number(fd.metros_dia), orden: Number(fd.orden) || 0 });
+    if (error) return fallo(error);
+    toast('Diámetro agregado');
+    vistaAdmin();
+  };
   $('#frmMun').onsubmit = async (ev) => {
     ev.preventDefault();
     if (!ev.target.reportValidity()) return;
