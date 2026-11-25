@@ -219,3 +219,19 @@ input.corto { width: 70px; }
 .gg-sin { margin-top: 1rem; }
 .gg-sin ul { margin: .4rem 0 0; padding-left: 1.1rem; display: grid; gap: .3rem; }
 @media (max-width: 600px) { .gg .g-fila { grid-template-columns: 150px 1fr; } .gg-pill { display: none; } .g-fila { grid-template-columns: 110px 1fr; } .g-label small { display: none; } }
+
+/* Flujograma: etapa 2, cancelado, actividades, PEP */
+.badge.e2 { background: #e6f0ff; color: #2b4f9e; }
+.badge.e9 { background: #eceef1; color: #5a6472; text-decoration: line-through; }
+.kpi.k9 b { color: var(--muted); }
+.plan.cancel { background: #eceef1; color: #5a6472; }
+.btn.peligro { background: var(--rojo); border-color: var(--rojo); }
+.btn.peligro:hover { background: #a52626; }
+.estado.curso { background: #e3eefc; color: var(--azul); }
+.act-etapa { border-top: 1px solid #eef1f5; padding: .2rem 0; }
+.act-etapa summary { cursor: pointer; padding: .5rem 0; list-style: revert; }
+.act-etapa .doc { padding-left: .4rem; }
+.act.cerrada .doc-info > b { color: var(--muted); font-weight: 600; }
+.act .area { display: inline-block; background: #eef1f5; color: #3b4656; border-radius: 4px; padding: 0 .35rem; font-weight: 600; }
+.act-sel { width: auto !important; max-width: 9.5rem; margin: 0 !important; font: inherit; font-size: .82rem; padding: .2rem .3rem; border: 1px solid var(--borde); border-radius: 6px; background: #fff; flex: none; }
+.rombo { color: var(--alerta); }

@@ -4,7 +4,8 @@ import { SUPABASE_URL, SUPABASE_ANON_KEY, NOMBRE_APP, ETAPAS } from './config.js
 // ---------------------------------------------------------------------
 // Constantes y estado
 // ---------------------------------------------------------------------
-const ROLES = ['Administrador', 'Consulta', 'Comercial', 'Líder', 'Proyectista', 'Permisos', 'Construcción', 'Sin rol'];
+const ROLES = ['Administrador', 'Consulta', 'Comercial', 'Líder', 'Proyectista', 'Inversiones', 'Permisos', 'Construcción', 'Sin rol'];
+const ESTATUS_ACT = ['Pendiente', 'En proceso', 'Hecha', 'No aplica'];
 const SEGMENTOS = ['Residencial', 'Comercial', 'Industrial'];
 const MATERIALES = ['Polietileno', 'Acero'];
 const ESTATUS_LIC = ['Pendiente', 'En trámite', 'Aprobada', 'Rechazada'];
@@ -13,7 +14,7 @@ const BUCKET = 'expedientes';
 const configurado = !SUPABASE_URL.includes('TU-PROYECTO') && !SUPABASE_ANON_KEY.includes('PEGA-AQUI');
 const sb = configurado ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 const app = document.getElementById('app');
-const S = { session: null, perfil: null, municipios: [], configDocs: [], perfiles: [], tiempos: [], ganttListo: false };
+const S = { session: null, perfil: null, municipios: [], configDocs: [], perfiles: [], tiempos: [], ganttListo: false, actividades: [], flujoListo: false };
 
 // ---------------------------------------------------------------------
 // Utilidades
@@ -35,6 +36,8 @@ const puedeEditar = () => !!rol() && !['Consulta', 'Sin rol'].includes(rol());
 const puedeCrear = () => ['Comercial', 'Administrador'].includes(rol());
 const badgeEtapa = (e) => `<span class="badge e${num(e)}">${esc(e)}</span>`;
 const vencido = (p) => p.fecha_compromiso && p.fecha_compromiso < hoyISO() && num(p.etapa) < 8;
+const actividadesDe = (etapa) => S.actividades.filter((a) => a.etapa === etapa).sort((a, b) => a.orden - b.orden || a.id - b.id);
+const cerrada = (st) => st === 'Hecha' || st === 'No aplica';
 
 function toast(msg, tipo = 'ok') {
   const t = document.createElement('div');
@@ -106,12 +109,16 @@ async function cargarCatalogos() {
   const tiempos = await sb.from('config_tiempos').select('*');
   S.ganttListo = !tiempos.error;
   S.tiempos = tiempos.data || [];
+  // Actividades del flujograma (si aún no se ejecuta supabase/003_flujograma.sql, se usa el flujo anterior)
+  const act = await sb.from('config_actividades').select('*').order('orden');
+  S.flujoListo = !act.error;
+  S.actividades = act.data || [];
 }
 
 // ---------------------------------------------------------------------
 // Gantt: se calcula hacia atrás desde la fecha requerida de gas
 // ---------------------------------------------------------------------
-const ETAPAS_ANTES = [1, 3, 4, 5, 6];   // terminan el día que se requiere el gas
+const ETAPAS_ANTES = [1, 2, 3, 4, 5, 6];   // terminan el día que se requiere el gas
 const ETAPAS_DESPUES = [7];             // ocurren después de la puesta en servicio
 const DIA = 86400000;
 function diaDe(x) {
@@ -124,6 +131,11 @@ const isoDe = (d) => d.toLocaleDateString('en-CA');
 const semanasDe = (seg, etapa) => Number(S.tiempos.find((t) => t.segmento === seg && t.etapa === etapa)?.semanas ?? 0);
 const totalSemanas = (seg) => ETAPAS_ANTES.reduce((a, n) => a + semanasDe(seg, etapaPorNum(n)), 0);
 const nombreCorto = (e) => e.replace(/^\d+\.\s*/, '');
+const diasFlujo = (etapa) => {
+  // El PEP de Inversiones corre en paralelo al dictamen de diseño: no se suma
+  const d = actividadesDe(etapa).filter((a) => a.area !== 'Inversiones').reduce((t, a) => t + Number(a.dias || 0), 0);
+  return d ? `${d} día${d === 1 ? '' : 's'} hábil${d === 1 ? '' : 'es'} ≈ ${Math.round(d / 5 * 10) / 10} sem` : '—';
+};
 
 function planDe(p) {
   if (!p.fecha_requerida_gas || !S.tiempos.length) return null;
@@ -153,6 +165,7 @@ function planDe(p) {
 function estadoPlan(p, plan = planDe(p)) {
   if (!plan) return null;
   const n = num(p.etapa);
+  if (n === 9) return { clase: 'cancel', texto: 'Cancelado' };
   if (n >= 8) return { clase: 'ok', texto: 'Entregado' };
   const fila = plan.filas.find((f) => f.n === Math.max(1, n));
   if (!fila) return null;
@@ -306,7 +319,8 @@ function enMiBandeja(p) {
     case 'Consulta': return true;
     case 'Comercial': return p.solicitante_id === me;
     case 'Líder': return n === 1;
-    case 'Proyectista': return n === 3 && p.proyectista_id === me;
+    case 'Proyectista': return (n === 2 || n === 3) && p.proyectista_id === me;
+    case 'Inversiones': return n >= 3 && n < 8 && !p.elemento_pep; // tras aprobar la factibilidad
     case 'Permisos': return n === 4;
     case 'Construcción': return n >= 5 && n <= 7;
     default: return false;
@@ -370,7 +384,7 @@ function tablaProyectos(lista) {
         <td>${esc(p.nombre)}${p.bloqueo ? ' <span class="bloq" title="' + esc(p.bloqueo) + '">⚠ Bloqueo</span>' : ''}</td>
         <td>${esc(p.municipio)}</td>
         <td>${esc(p.segmento)}${p.segmento === 'Industrial' ? ' · ' + esc(p.material) : ''}</td>
-        <td>${badgeEtapa(p.etapa)}</td>
+        <td>${badgeEtapa(p.etapa)}${num(p.etapa) === 2 && p.factibilidad === 'En revisión' ? ' <span class="pill">Por aprobar Ventas</span>' : ''}</td>
         <td>${p.proyectista_id ? esc(nombreDe(p.proyectista_id)) : '<span class="muted">—</span>'}</td>
         <td>${fecha(p.fecha_requerida_gas)}</td>
         <td>${pillPlan(estadoPlan(p))}</td>
@@ -613,18 +627,32 @@ const gestionaLicencias = () => ['Administrador', 'Líder', 'Permisos'].includes
 
 function accionesDe(p) {
   const r = rol(), me = S.perfil.id, n = num(p.etapa), adm = esAdmin(), out = [];
+  const flujo = S.flujoListo;
   if (n === 1 && (adm || r === 'Líder')) {
-    out.push({ id: 'asignar', label: 'Asignar proyectista', destino: etapaPorNum(3) });
+    out.push({ id: 'asignar', label: 'Asignar proyectista', destino: etapaPorNum(flujo ? 2 : 3) });
     out.push({ id: 'devolver', label: 'Devolver a Comercial', destino: etapaPorNum(0), sec: true });
   }
   if (n === 0 && (adm || (r === 'Comercial' && p.solicitante_id === me)))
     out.push({ id: 'avanzar', label: 'Reenviar al Líder', destino: etapaPorNum(1), revisaDocs: '1. Solicitud' });
+  if (n === 2 && flujo) {
+    const proy = adm || (r === 'Proyectista' && p.proyectista_id === me);
+    const ventas = adm || (r === 'Comercial' && p.solicitante_id === me);
+    if (p.factibilidad !== 'En revisión' && proy)
+      out.push({ id: 'factEnviar', label: 'Enviar factibilidad a Ventas', revisaDocs: p.etapa, revisaAct: p.etapa, omiteAct: 'Aprobación de factibilidad' });
+    if (p.factibilidad === 'En revisión' && ventas) {
+      out.push({ id: 'avanzar', label: 'Aprobar factibilidad', destino: etapaPorNum(3), revisaDocs: p.etapa });
+      out.push({ id: 'factCambios', label: 'Pedir cambios', sec: true });
+      out.push({ id: 'cancelar', label: 'No aprobar (cancelar proyecto)', destino: etapaPorNum(9), sec: true, peligro: true });
+    }
+  }
   if (n === 3 && (adm || (r === 'Proyectista' && p.proyectista_id === me)))
-    out.push({ id: 'avanzar', label: 'Enviar a Permisos', destino: etapaPorNum(4), revisaDocs: p.etapa });
+    out.push({ id: 'avanzar', label: 'Enviar a Permisos', destino: etapaPorNum(4), revisaDocs: p.etapa, revisaAct: p.etapa });
   if (n === 4 && (adm || r === 'Permisos'))
-    out.push({ id: 'avanzar', label: 'Enviar a Construcción', destino: etapaPorNum(5), revisaDocs: p.etapa, revisaLic: true });
+    out.push({ id: 'avanzar', label: 'Enviar a Construcción', destino: etapaPorNum(5), revisaDocs: p.etapa, revisaLic: true, revisaPep: flujo, revisaAct: p.etapa });
   if (n >= 5 && n <= 7 && (adm || r === 'Construcción'))
-    out.push({ id: 'avanzar', label: `Avanzar a «${siguienteEtapa(p.etapa)}»`, destino: siguienteEtapa(p.etapa), revisaDocs: p.etapa });
+    out.push({ id: 'avanzar', label: `Avanzar a «${siguienteEtapa(p.etapa)}»`, destino: siguienteEtapa(p.etapa), revisaDocs: p.etapa, revisaAct: p.etapa });
+  if (flujo && n >= 3 && n < 8 && (adm || r === 'Inversiones'))
+    out.push({ id: 'pep', label: p.elemento_pep ? 'Corregir Elemento PEP' : 'Registrar Elemento PEP', sec: !!p.elemento_pep });
   if (adm) out.push({ id: 'mover', label: 'Mover a otra etapa', sec: true });
   if (puedeEditar()) out.push({ id: 'comentar', label: 'Agregar comentario', sec: true });
   return out;
@@ -632,17 +660,21 @@ function accionesDe(p) {
 
 async function vistaDetalle(id) {
   const v = vista('Cargando proyecto…');
-  const [rp, rd, rh, rl] = await Promise.all([
+  const [rp, rd, rh, rl, ra] = await Promise.all([
     sb.from('proyectos').select('*').eq('id', id).maybeSingle(),
     sb.from('documentos').select('*').eq('proyecto_id', id).order('created_at'),
     sb.from('historial').select('*').eq('proyecto_id', id).order('created_at', { ascending: false }),
     sb.from('licencias').select('*').eq('proyecto_id', id).order('created_at'),
+    S.flujoListo ? sb.from('proyecto_actividades').select('*').eq('proyecto_id', id) : Promise.resolve({ data: [] }),
   ]);
-  const err = rp.error || rd.error || rh.error || rl.error;
+  const err = rp.error || rd.error || rh.error || rl.error || ra.error;
   if (err) { v.innerHTML = `<p class="error">${esc(errorTxt(err))}</p>`; return; }
   const p = rp.data;
   if (!p) { v.innerHTML = '<p class="vacio">Proyecto no encontrado. <a href="#/inicio">Volver</a></p>'; return; }
   const docs = rd.data, hist = rh.data, lics = rl.data;
+  const avance = new Map((ra.data || []).map((x) => [x.actividad_id, x]));
+  const estAct = (a) => avance.get(a.id)?.estatus || 'Pendiente';
+  const actPendientes = (etapa, omite) => actividadesDe(etapa).filter((a) => a.nombre !== omite && !cerrada(estAct(a)));
   const plan = planDe(p);
   const estPlan = estadoPlan(p, plan);
 
@@ -661,7 +693,8 @@ async function vistaDetalle(id) {
   const licPendientes = lics.filter((l) => l.estatus !== 'Aprobada');
 
   // Etapas cuyos documentos se muestran
-  const etapasDocs = ETAPAS.filter((e) => num(e) >= 1 && num(e) <= Math.max(1, n));
+  const nVista = n === 9 ? 2 : Math.max(1, n); // un cancelado muestra hasta la factibilidad
+  const etapasDocs = ETAPAS.filter((e) => num(e) >= 1 && num(e) <= Math.min(nVista, 8));
   const idsConfig = new Set();
   const bloqueDocs = etapasDocs.map((e) => {
     const lista = docsDe(e, p.segmento, p.material);
@@ -689,9 +722,9 @@ async function vistaDetalle(id) {
   }
 
   const acciones = accionesDe(p);
-  const stepper = ETAPAS.filter((e) => num(e) >= 1).map((e) => {
+  const stepper = ETAPAS.filter((e) => num(e) >= 1 && num(e) <= 8).map((e) => {
     const k = num(e);
-    const cls = n === 0 ? (k === 1 ? 'actual devuelto' : '') : k < n ? 'hecho' : k === n ? 'actual' : '';
+    const cls = n === 9 ? (k <= 2 ? 'hecho' : '') : n === 0 ? (k === 1 ? 'actual devuelto' : '') : k < n ? 'hecho' : k === n ? 'actual' : '';
     return `<li class="${cls}"><span>${k}</span><small>${esc(e.replace(/^\d+\.\s*/, ''))}</small></li>`;
   }).join('');
 
@@ -710,12 +743,19 @@ async function vistaDetalle(id) {
            ${ganttHtml(p, plan, realesDe(p, hist))}`}
     </section>
     ${n === 0 ? `<div class="aviso">Devuelta a Comercial. Revisa el historial para ver el motivo, corrige y reenvía.</div>` : ''}
+    ${n === 9 ? `<div class="aviso">Proyecto cancelado (factibilidad no aprobada por Ventas). El motivo está en el historial.</div>` : ''}
+    ${n === 2 && S.flujoListo ? (p.factibilidad === 'En revisión'
+      ? `<div class="aviso">Factibilidad técnico-económica <b>en revisión por Ventas</b> (tiempo objetivo: 2 días). Ventas la aprueba, pide cambios o la rechaza.</div>`
+      : `<div class="nota ok">Ingeniería y factibilidad: el proyectista elabora plano, modelo hidráulico, ficha de inversión y formato de factibilidad; al terminar la envía a Ventas.</div>`) : ''}
+    ${S.flujoListo && n >= 3 && n < 8 && !p.elemento_pep ? `<div class="aviso">Falta el <b>Elemento PEP</b> (lo registra Inversiones). Sin él no se puede entrar a Construcción.</div>` : ''}
 
     <div class="cols">
       <div class="col">
         ${acciones.length ? `<section class="card"><h2>Acciones</h2>
           <div class="botones">${acciones.map((a, i) => `<button class="btn ${a.sec ? 'sec' : ''}" data-accion="${i}">${esc(a.label)}</button>`).join('')}</div>
           <div id="accionForm"></div></section>` : ''}
+
+        ${S.flujoListo ? `<section class="card" id="cardActividades"></section>` : ''}
 
         <section class="card">
           <div class="card-h"><h2>Expediente</h2></div>
@@ -727,7 +767,7 @@ async function vistaDetalle(id) {
           </div>
         </section>
 
-        ${n >= 3 || lics.length ? `<section class="card">
+        ${(n >= 3 && n !== 9) || lics.length ? `<section class="card">
           <h2>Licencias y permisos</h2>
           ${lics.length ? `<div class="tabla-wrap"><table class="tabla compacta"><thead><tr><th>Tipo</th><th>Dependencia</th><th>Estatus</th><th>Ingreso</th><th>Vence</th><th>Notas</th>${esAdmin() ? '<th></th>' : ''}</tr></thead><tbody>
             ${lics.map((l) => `<tr>
@@ -761,6 +801,8 @@ async function vistaDetalle(id) {
               <dt>Descripción</dt><dd class="pre">${esc(p.descripcion) || '—'}</dd>
               <dt>Solicitante</dt><dd>${esc(nombreDe(p.solicitante_id))}</dd>
               <dt>Proyectista</dt><dd>${p.proyectista_id ? esc(nombreDe(p.proyectista_id)) : '—'}</dd>
+              ${S.flujoListo ? `<dt>Factibilidad</dt><dd>${esc(p.factibilidad || '—')}</dd>
+              <dt>Elemento PEP</dt><dd>${p.elemento_pep ? `${esc(p.elemento_pep)}${p.fecha_pep ? ` <small class="muted">(${fecha(p.fecha_pep)})</small>` : ''}` : '<span class="muted">Pendiente</span>'}</dd>` : ''}
               <dt>Creado</dt><dd>${fechaHora(p.created_at)}</dd>
             </dl>
           </div>
@@ -790,31 +832,80 @@ async function vistaDetalle(id) {
 
   const recargar = () => vistaDetalle(id);
 
+  // --- Actividades del flujograma (checklist por etapa)
+  const cardAct = $('#cardActividades');
+  const filaAct = (a) => {
+    const reg = avance.get(a.id), st = estAct(a);
+    const icono = { Hecha: ['ok', '✓'], 'No aplica': ['opc', '–'], 'En proceso': ['curso', '…'] }[st] || ['opc', '·'];
+    return `<div class="doc act ${st === 'Hecha' || st === 'No aplica' ? 'cerrada' : ''}">
+      <span class="estado ${icono[0]}">${icono[1]}</span>
+      <div class="doc-info"><b>${a.decision ? '<span class="rombo" title="Punto de decisión">◆</span> ' : ''}${esc(a.nombre)}</b>
+        <small><span class="area">${esc(a.area)}</span>${a.dias != null ? ` · ${Number(a.dias)} día${Number(a.dias) === 1 ? '' : 's'}` : ''}${a.entregables ? ` · ${esc(a.entregables)}` : ''}</small>
+        ${reg && st !== 'Pendiente' ? `<small class="muted">${esc(st)} · ${esc(nombreDe(reg.usuario_id))} · ${fecha(reg.updated_at)}</small>` : ''}
+      </div>
+      ${puedeEditar() && n !== 9 ? `<select class="act-sel" data-act="${a.id}">${ESTATUS_ACT.map((x) => `<option ${x === st ? 'selected' : ''}>${x}</option>`).join('')}</select>` : `<small class="muted">${esc(st)}</small>`}
+    </div>`;
+  };
+  const pintarActividades = () => {
+    if (!cardAct) return;
+    const etapasAct = ETAPAS.filter((e) => num(e) >= 1 && num(e) <= Math.min(nVista, 8));
+    const actual = n >= 1 && n <= 8 ? p.etapa : null;
+    const resumen = (lista) => `${lista.filter((x) => cerrada(estAct(x))).length}/${lista.length}`;
+    const delActual = actual ? actividadesDe(actual) : [];
+    const abiertas = new Set($$('details[open]', cardAct).map((d) => d.dataset.e));
+    const primera = !cardAct.innerHTML;
+    cardAct.innerHTML = `<div class="card-h"><h2>Actividades del proceso</h2>
+        ${delActual.length ? `<span class="pill ${delActual.every((x) => cerrada(estAct(x))) ? 'ok' : ''}">${resumen(delActual)} de la etapa actual</span>` : ''}</div>
+      <p class="muted chico">Según el Flujograma de Proyectos. Los días son el tiempo objetivo; ◆ = punto de decisión.</p>
+      ${etapasAct.map((e) => {
+        const lista = actividadesDe(e);
+        if (!lista.length) return '';
+        return `<details class="act-etapa" data-e="${esc(e)}" ${(primera ? e === actual : abiertas.has(e)) ? 'open' : ''}><summary><b>${esc(e)}</b> <small class="muted">${resumen(lista)}</small></summary>${lista.map(filaAct).join('')}</details>`;
+      }).join('') || '<p class="muted">No hay actividades configuradas.</p>'}`;
+    $$('select[data-act]', cardAct).forEach((sel) => (sel.onchange = async () => {
+      const actividad_id = Number(sel.dataset.act);
+      const fila = { proyecto_id: p.id, actividad_id, estatus: sel.value, usuario_id: S.perfil.id, updated_at: new Date().toISOString() };
+      sel.disabled = true;
+      const { error } = await sb.from('proyecto_actividades').upsert(fila, { onConflict: 'proyecto_id,actividad_id' });
+      if (error) { sel.disabled = false; return fallo(error); }
+      avance.set(actividad_id, fila);
+      pintarActividades();
+    }));
+  };
+  pintarActividades();
+
   // --- Acciones de flujo
   $$('[data-accion]', v).forEach((b) => (b.onclick = () => {
     const a = acciones[Number(b.dataset.accion)];
     const pendDocs = a.revisaDocs ? faltantes(a.revisaDocs) : [];
     const pendLic = a.revisaLic ? licPendientes : [];
-    const bloqueado = (pendDocs.length || pendLic.length) && !esAdmin();
+    const pendPep = a.revisaPep && !p.elemento_pep;
+    const pendAct = a.revisaAct ? actPendientes(a.revisaAct, a.omiteAct) : [];
+    const bloqueado = (pendDocs.length || pendLic.length || pendPep) && !esAdmin();
     const proyectistas = S.perfiles.filter((x) => x.rol === 'Proyectista' && x.activo);
 
     let extra = '';
     if (a.id === 'asignar') extra = `<label>Proyectista *<select name="proyectista_id" required><option value="">Selecciona…</option>
       ${proyectistas.map((x) => `<option value="${x.id}" ${x.id === p.proyectista_id ? 'selected' : ''}>${esc(x.nombre || x.email)}</option>`).join('')}</select></label>
       ${proyectistas.length ? '' : '<p class="error">No hay usuarios con rol Proyectista.</p>'}`;
+    if (a.id === 'pep') extra = `<label>Elemento PEP *<input name="elemento_pep" required maxlength="60" value="${esc(p.elemento_pep || '')}" placeholder="Ej. I-26-0123-001"></label>
+      <label>Fecha de creación del PEP<input type="date" name="fecha_pep" value="${esc(p.fecha_pep || hoyISO())}"></label>`;
     if (a.id === 'mover') extra = `<label>Nueva etapa *<select name="etapa" required>${ETAPAS.filter((e) => e !== p.etapa).map((e) => `<option>${esc(e)}</option>`).join('')}</select></label>`;
 
-    const requiereComentario = ['devolver', 'comentar'].includes(a.id);
+    const requiereComentario = ['devolver', 'comentar', 'cancelar', 'factCambios'].includes(a.id);
+    const etiquetaCom = { devolver: 'Motivo de la devolución *', cancelar: 'Motivo por el que no se aprueba *', factCambios: 'Cambios que necesita la factibilidad *' }[a.id] || (requiereComentario ? 'Comentario *' : 'Comentario (opcional)');
     $('#accionForm').innerHTML = `<form class="accion">
       <h3>${esc(a.label)}</h3>
       ${pendDocs.length ? `<div class="aviso">Faltan documentos obligatorios: <b>${pendDocs.map((d) => esc(d.nombre)).join(', ')}</b></div>` : ''}
       ${pendLic.length ? `<div class="aviso">Licencias sin aprobar: <b>${pendLic.map((l) => esc(l.tipo)).join(', ')}</b></div>` : ''}
+      ${pendPep ? '<div class="aviso">Falta el <b>Elemento PEP</b>: pide a Inversiones que lo registre.</div>' : ''}
+      ${pendAct.length ? `<div class="aviso">Actividades del flujograma sin terminar: <b>${pendAct.map((x) => esc(x.nombre)).join(', ')}</b></div>` : ''}
       ${bloqueado ? '' : extra}
-      ${bloqueado ? '' : `<label>${requiereComentario ? (a.id === 'devolver' ? 'Motivo de la devolución *' : 'Comentario *') : 'Comentario (opcional)'}
+      ${bloqueado ? '' : `<label>${etiquetaCom}
         <textarea name="comentario" rows="3" ${requiereComentario ? 'required' : ''}></textarea></label>`}
       <div class="botones">
         <button type="button" class="btn sec" data-cancelar>Cancelar</button>
-        ${bloqueado ? '' : `<button class="btn">${pendDocs.length || pendLic.length ? 'Continuar de todos modos' : 'Confirmar'}</button>`}
+        ${bloqueado ? '' : `<button class="btn ${a.peligro ? 'peligro' : ''}">${pendDocs.length || pendLic.length || pendPep || pendAct.length ? 'Continuar de todos modos' : 'Confirmar'}</button>`}
       </div></form>`;
     const form = $('#accionForm form');
     $('[data-cancelar]', form).onclick = () => ($('#accionForm').innerHTML = '');
@@ -832,6 +923,9 @@ async function vistaDetalle(id) {
           const cambios = { comentario_cambio: fd.comentario?.trim() || null };
           if (a.id === 'asignar') { cambios.proyectista_id = fd.proyectista_id; cambios.etapa = a.destino; }
           else if (a.id === 'mover') cambios.etapa = fd.etapa;
+          else if (a.id === 'factEnviar') cambios.factibilidad = 'En revisión';
+          else if (a.id === 'factCambios') cambios.factibilidad = 'En elaboración';
+          else if (a.id === 'pep') { cambios.elemento_pep = fd.elemento_pep.trim(); cambios.fecha_pep = fd.fecha_pep || null; }
           else cambios.etapa = a.destino;
           r = await sb.from('proyectos').update(cambios).eq('id', p.id).select('id');
           if (!r.error && !r.data?.length) throw new Error('No tienes permiso para modificar este proyecto');
@@ -982,10 +1076,11 @@ async function vistaAdmin() {
     <section class="card">
       <h2>Tiempos por etapa (semanas)</h2>
       ${S.ganttListo ? `<p class="muted chico">El Gantt parte de la fecha requerida de gas y resta estas semanas hacia atrás. «Cierre y as-built» se cuenta después de la puesta en servicio.</p>
-      <div class="tabla-wrap"><table class="tabla compacta"><thead><tr><th>Etapa</th>${SEGMENTOS.map((s) => `<th>${s}</th>`).join('')}</tr></thead><tbody>
+      ${S.flujoListo ? '<p class="muted chico">«Flujograma» = suma de los días objetivo de las actividades de esa etapa (solo las que tienen días); úsalo como referencia para validar las semanas.</p>' : ''}
+      <div class="tabla-wrap"><table class="tabla compacta"><thead><tr><th>Etapa</th>${SEGMENTOS.map((s) => `<th>${s}</th>`).join('')}${S.flujoListo ? '<th>Flujograma</th>' : ''}</tr></thead><tbody>
       ${[...ETAPAS_ANTES, ...ETAPAS_DESPUES].map(etapaPorNum).filter(Boolean).map((e) => `<tr><td>${esc(e)}</td>${SEGMENTOS.map((s) =>
-        `<td><input type="number" class="corto" min="0" step="0.5" data-tseg="${s}" data-tetapa="${esc(e)}" value="${semanasDe(s, e)}"></td>`).join('')}</tr>`).join('')}
-      <tr><td><b>Total hasta el gas</b></td>${SEGMENTOS.map((s) => `<td><b>${totalSemanas(s)}</b></td>`).join('')}</tr>
+        `<td><input type="number" class="corto" min="0" step="0.5" data-tseg="${s}" data-tetapa="${esc(e)}" value="${semanasDe(s, e)}"></td>`).join('')}${S.flujoListo ? `<td class="muted">${diasFlujo(e)}</td>` : ''}</tr>`).join('')}
+      <tr><td><b>Total hasta el gas</b></td>${SEGMENTOS.map((s) => `<td><b>${totalSemanas(s)}</b></td>`).join('')}${S.flujoListo ? '<td></td>' : ''}</tr>
       </tbody></table></div>` : '<p class="muted">Ejecuta <b>supabase/002_gantt.sql</b> en Supabase para activar esta sección.</p>'}
     </section>
 

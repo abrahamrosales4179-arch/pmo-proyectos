@@ -11,15 +11,16 @@ Plataforma web para dar de alta solicitudes de proyectos, subir su expediente y 
 |---|---|
 | Nueva solicitud | Municipio, segmento (Residencial/Comercial/Industrial), material (solo Industrial), documentos obligatorios según el tipo; el botón Enviar se activa cuando están completos. |
 | Folio automático | `[clave municipio][R/C/I][P/A][año][consecutivo]`, ej. `ZRP26001`, `TIA26133`. Lo genera la base de datos, sin duplicados aunque dos personas envíen al mismo tiempo. |
-| Bandejas por rol | Administrador/Consulta: todo · Comercial: sus solicitudes · Líder: 1. Solicitud · Proyectista: 3. Carpeta técnica asignada a él · Permisos: 4 · Construcción: 5, 6 y 7. Cualquiera puede activar «Ver todos». |
-| Flujo | Líder asigna proyectista (1 → 3) o devuelve con motivo (→ 0). Comercial corrige y reenvía (0 → 1). Proyectista → Permisos → Construcción → Puesta en servicio → Cierre → Entregado a O&M. Antes de avanzar se revisan los documentos obligatorios de la etapa y que las licencias estén aprobadas. |
+| Bandejas por rol | Administrador/Consulta: todo · Comercial: sus solicitudes · Líder: 1. Solicitud · Proyectista: 2 y 3 asignadas a él · Inversiones: proyectos sin Elemento PEP · Permisos: 4 · Construcción: 5, 6 y 7. Cualquiera puede activar «Ver todos». |
+| Flujo (según el Flujograma de Proyectos, sep-2025) | Líder/Jefatura asigna proyectista (1 → 2) o devuelve con motivo (→ 0). Comercial corrige y reenvía (0 → 1). En **2. Ingeniería y factibilidad** el proyectista elabora plano, modelo hidráulico, ficha de inversión y factibilidad técnico-económica y la envía a Ventas; Ventas (el comercial solicitante) **aprueba** (→ 3), **pide cambios** o **no aprueba** (→ 9. Cancelado, con motivo). Inversiones registra el **Elemento PEP**, obligatorio para entrar a Construcción. Después: Carpeta técnica → Permisos → Construcción → Puesta en servicio → Cierre → Entregado a O&M. Antes de avanzar se revisan documentos obligatorios, licencias aprobadas y PEP. |
+| Actividades del proceso | Cada proyecto muestra la lista de actividades del flujograma por etapa (área responsable, días objetivo, entregables y puntos de decisión ◆). Cada quien marca Pendiente / En proceso / Hecha / No aplica; queda registrado quién y cuándo. Si hay actividades sin terminar, la app avisa antes de avanzar de etapa. |
 | Reglas en el servidor | Cada rol solo puede hacer los movimientos que le tocan, aunque alguien intente saltarse la página (lo valida la base de datos). |
 | Expediente | Archivos por documento y etapa, en un bucket privado; enlaces de descarga temporales. |
 | Licencias | Tipo, dependencia, estatus, fechas de ingreso y vencimiento. |
 | Seguimiento | Fecha compromiso (se marca en rojo si está vencida), bloqueo actual y siguiente acción. |
 | Gantt | Parte de la **fecha requerida de gas** y calcula hacia atrás cuándo debe empezar y terminar cada etapa, según las semanas por segmento (editables en Administración). Muestra plan contra real, línea de hoy y de gas requerido, y marca cada proyecto como A tiempo, En riesgo o Atrasado. Al capturar la solicitud avisa si la fecha no alcanza y propone la más próxima posible. |
 | Historial | Se registra solo: creación, cambios de etapa, asignaciones y comentarios, con usuario y fecha. |
-| Administración | Roles y usuarios activos, documentos requeridos por etapa/segmento/material, municipios y claves. |
+| Administración | Roles y usuarios activos, documentos requeridos por etapa/segmento/material, tiempos por etapa (con la referencia de días del flujograma), municipios y claves. |
 
 ## Instalación (unos 20 minutos)
 
@@ -47,14 +48,20 @@ export const SUPABASE_ANON_KEY = 'eyJhbGciOi...';
 
 ### 4. Dar de alta al equipo
 1. Supabase → **Authentication → Users → Add user** por cada persona (correo + contraseña temporal, Auto Confirm).
-2. En la app → **Administración**: ponles nombre y rol (Comercial, Líder, Proyectista, Permisos, Construcción o Consulta).
+2. En la app → **Administración**: ponles nombre y rol (Comercial, Líder, Proyectista, Inversiones, Permisos, Construcción o Consulta).
 3. Cada quien puede cambiar su contraseña en **Mi cuenta** (clic en su nombre, arriba a la derecha).
 
 ### 5. Ajustar catálogos
 En **Administración → Documentos requeridos** reemplaza los documentos de ejemplo por tu lista real (los 23 de Config_Documentos), indicando etapa, segmento, material y si es obligatorio.
 
 ## Actualizar una instalación existente
-Si ya ejecutaste `schema.sql` antes de que existiera el Gantt, ejecuta una vez `supabase/002_gantt.sql` en el SQL Editor de Supabase.
+Ejecuta en el SQL Editor de Supabase, una sola vez y en orden, los scripts que te falten:
+1. `supabase/002_gantt.sql` – Gantt (fecha requerida de gas y tiempos por etapa).
+2. `supabase/003_flujograma.sql` – alineación con el Flujograma de Proyectos: etapa 2 y aprobación de Ventas, estado Cancelado, rol Inversiones y Elemento PEP, actividades del proceso, documentos requeridos del flujograma (reemplaza los de ejemplo que no tengan archivos) y tiempo de la etapa 2.
+
+Mientras no se ejecute el 003, la app sigue funcionando con el flujo anterior (1 → 3).
+
+> Los proyectos que ya estaban en «1. Solicitud» pasarán por la nueva etapa 2 cuando el Líder asigne proyectista. Los que ya están en 3 o más no cambian.
 
 ## Probar en tu computadora (opcional)
 ```bash
@@ -74,7 +81,9 @@ index.html            Página
 app.js                Lógica (pantallas, flujo, subida de archivos)
 config.js             Conexión a Supabase y etapas
 styles.css            Estilos
-supabase/schema.sql   Tablas, folio, reglas por rol, historial y almacenamiento
+supabase/schema.sql   Instalación nueva: todo (incluye 002 y 003)
+supabase/002_gantt.sql        Actualización: Gantt
+supabase/003_flujograma.sql   Actualización: flujo según el Flujograma de Proyectos
 ```
 
 ## Siguientes pasos sugeridos

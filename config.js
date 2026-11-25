@@ -11,14 +11,18 @@ export const SUPABASE_ANON_KEY = 'sb_publishable_55HJQy_LSjUuCF-byyLiAw_qjGPgP__
 export const NOMBRE_APP = 'PMO Proyectos DGJ';
 
 // Etapas del proceso. El número al inicio es el que usan las reglas de la
-// base de datos; si cambias nombres, cambia también config_documentos.etapa.
+// base de datos; si cambias nombres, cambia también config_documentos.etapa,
+// config_actividades.etapa y config_tiempos.etapa. Alineadas al Flujograma de
+// Proyectos (sep-2025); ver supabase/003_flujograma.sql.
 export const ETAPAS = [
   '0. Devuelta a Comercial',
   '1. Solicitud',
+  '2. Ingeniería y factibilidad',
   '3. Carpeta técnica',
   '4. Permisos',
   '5. Construcción',
   '6. Puesta en servicio',
   '7. Cierre y as-built',
   '8. Entregado a O&M',
+  '9. Cancelado',
 ];
