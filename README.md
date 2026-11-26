@@ -11,8 +11,8 @@ Plataforma web para dar de alta solicitudes de proyectos, subir su expediente y 
 |---|---|
 | Nueva solicitud | Municipio, segmento (Residencial/Comercial/Industrial), material (solo Industrial), documentos obligatorios según el tipo; el botón Enviar se activa cuando están completos. |
 | Folio automático | `[clave municipio][R/C/I][P/A][año][consecutivo]`, ej. `ZRP26001`, `TIA26133`. Lo genera la base de datos, sin duplicados aunque dos personas envíen al mismo tiempo. |
-| Bandejas por rol | Administrador/Consulta: todo · Comercial: sus solicitudes · Líder: 1. Solicitud · Proyectista: 2 y 3 asignadas a él, y las de 4 que aún no tienen Elemento PEP · Permisos: 4 · Construcción: 5, 6 y 7. Cualquiera puede activar «Ver todos». |
-| Flujo (según el Flujograma de Proyectos, sep-2025) | Líder/Jefatura asigna proyectista (1 → 2) o devuelve con motivo (→ 0). Comercial corrige y reenvía (0 → 1). En **2. Ingeniería y factibilidad** el proyectista elabora plano, modelo hidráulico, ficha de inversión y factibilidad técnico-económica y la envía a Ventas; Ventas (el comercial solicitante) **aprueba** (→ 3), **pide cambios** o **no aprueba** (→ 9. Cancelado, con motivo). El proyectista registra el **Elemento PEP** (lo gestiona con Inversiones), obligatorio para entrar a Construcción. Después: Carpeta técnica → Permisos → Construcción → Puesta en servicio → Cierre → Entregado a O&M. Antes de avanzar se revisan documentos obligatorios, licencias aprobadas y PEP. |
+| Bandejas por rol | Administrador/Consulta: todo · Comercial: sus solicitudes (incluida la aprobación KAM) · Líder: Solicitud y Socialización · Proyectista: Anteproyecto, PEP, Dictamen, Expediente, DRO y Carpeta técnica de sus proyectos · Permisos: Licencias y Socialización · Construcción: Construcción, Cierre y Puesta en servicio. Cualquiera puede activar «Ver todos». |
+| Flujo (14 etapas) | 1 Solicitud (Comercial; el Líder asigna proyectista o devuelve) → 2 Anteproyecto y factibilidad (Proyectista) → 3 Aprobación comercial/KAM (aprueba, pide cambios → 2, o cancela → 99) → 4 Obtención del PEP (Proyectista, con Inversiones) → 5 Dictamen de diseño → 6 Expediente de permisos → 7 Revisión DRO (con correcciones → 6) → 8 Licencias (Permisos) → 9 Socialización y liberación de zona (Permisos/Líder) → 10 Carpeta técnica (Proyectista) → 11 Construcción (puede regresar a 10 si la carpeta está incompleta) → 12 Cierre y as-built → 13 Puesta en servicio → 14 Entregado a O&M. Antes de avanzar se revisan documentos obligatorios, licencias aprobadas (en 8) y Elemento PEP (para pasar de 4). Todo regreso o cancelación pide motivo. |
 | Actividades del proceso | Cada proyecto muestra la lista de actividades del flujograma por etapa (área responsable, días objetivo, entregables y puntos de decisión ◆). Cada quien marca Pendiente / En proceso / Hecha / No aplica; queda registrado quién y cuándo. Si hay actividades sin terminar, la app avisa antes de avanzar de etapa. |
 | Reglas en el servidor | Cada rol solo puede hacer los movimientos que le tocan, aunque alguien intente saltarse la página (lo valida la base de datos). |
 | Expediente | Archivos por documento y etapa, en un bucket privado; enlaces de descarga temporales. |
@@ -60,6 +60,7 @@ Ejecuta en el SQL Editor de Supabase, una sola vez y en orden, los scripts que t
 1. `supabase/002_gantt.sql` – Gantt (fecha requerida de gas y tiempos por etapa).
 2. `supabase/003_flujograma.sql` – alineación con el Flujograma de Proyectos: etapa 2 y aprobación de Ventas, estado Cancelado, rol Inversiones y Elemento PEP, actividades del proceso, documentos requeridos del flujograma (reemplaza los de ejemplo que no tengan archivos) y tiempo de la etapa 2.
 3. `supabase/004_construccion.sql` – el Elemento PEP lo registra el proyectista (ya no hay rol Inversiones) y se agrega la estimación del tiempo de construcción con su tabla de rendimientos.
+4. `supabase/005_etapas.sql` – flujo de 14 etapas (expediente de permisos aparte de la carpeta técnica); mueve proyectos, historial, documentos, actividades y tiempos a las etapas nuevas.
 
 Mientras no se ejecute el 003, la app sigue funcionando con el flujo anterior (1 → 3).
 
@@ -83,10 +84,11 @@ index.html            Página
 app.js                Lógica (pantallas, flujo, subida de archivos)
 config.js             Conexión a Supabase y etapas
 styles.css            Estilos
-supabase/schema.sql   Instalación nueva: todo (incluye 002, 003 y 004)
+supabase/schema.sql   Instalación nueva: todo (incluye 002 a 005)
 supabase/002_gantt.sql        Actualización: Gantt
 supabase/003_flujograma.sql   Actualización: flujo según el Flujograma de Proyectos
 supabase/004_construccion.sql Actualización: PEP por proyectista y tiempo de construcción
+supabase/005_etapas.sql      Actualización: flujo de 14 etapas
 ```
 
 ## Siguientes pasos sugeridos

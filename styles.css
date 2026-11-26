@@ -99,10 +99,15 @@ input.corto { width: 70px; }
 .badge { display: inline-block; padding: .15rem .55rem; border-radius: 99px; font-size: .78rem; font-weight: 600; background: #e8eef6; color: #2f4a6b; white-space: nowrap; }
 .badge.e0 { background: #fdecd5; color: #8a5300; }
 .badge.e1 { background: #e3eefc; color: #1f5fa8; }
-.badge.e3 { background: #ede6fb; color: #5b3aa8; }
-.badge.e4 { background: #fbf2d6; color: #7a5c00; }
-.badge.e5, .badge.e6, .badge.e7 { background: #dff3f1; color: #19695f; }
-.badge.e8 { background: #ddf3e5; color: #1e7a45; }
+/* Ingeniería y aprobación (2-4) */
+.badge.e2, .badge.e3, .badge.e4 { background: #ede6fb; color: #5b3aa8; }
+/* Diseño y permisos (5-10) */
+.badge.e5, .badge.e6, .badge.e7, .badge.e8, .badge.e9, .badge.e10 { background: #fbf2d6; color: #7a5c00; }
+/* Obra y puesta en servicio (11-13) */
+.badge.e11, .badge.e12, .badge.e13 { background: #dff3f1; color: #19695f; }
+.badge.e14 { background: #ddf3e5; color: #1e7a45; }
+.badge.e99 { background: #eceef1; color: #5a6472; text-decoration: line-through; }
+.kpi.k99 b { color: var(--muted); }
 .bloq { color: var(--rojo); font-size: .78rem; font-weight: 600; }
 .pill { font-size: .8rem; padding: .15rem .6rem; border-radius: 99px; background: #fdecd5; color: #8a5300; }
 .pill.ok { background: #ddf3e5; color: var(--ok); }
@@ -133,7 +138,7 @@ input.corto { width: 70px; }
 .accion h3 { margin-top: .5rem; }
 
 .stepper { list-style: none; display: flex; padding: 0; margin: 0 0 1rem; overflow-x: auto; gap: 0; }
-.stepper li { flex: 1; min-width: 90px; display: grid; justify-items: center; gap: .25rem; position: relative; text-align: center; }
+.stepper li { flex: 1; min-width: 72px; display: grid; justify-items: center; gap: .25rem; position: relative; text-align: center; }
 .stepper li::before { content: ""; position: absolute; top: 14px; left: -50%; width: 100%; height: 3px; background: var(--borde); z-index: 0; }
 .stepper li:first-child::before { display: none; }
 .stepper span { width: 30px; height: 30px; border-radius: 50%; background: #fff; border: 2px solid var(--borde); display: grid; place-items: center; font-weight: 700; z-index: 1; font-size: .85rem; }
@@ -221,9 +226,6 @@ input.corto { width: 70px; }
 @media (max-width: 600px) { .gg .g-fila { grid-template-columns: 150px 1fr; } .gg-pill { display: none; } .g-fila { grid-template-columns: 110px 1fr; } .g-label small { display: none; } }
 
 /* Flujograma: etapa 2, cancelado, actividades, PEP */
-.badge.e2 { background: #e6f0ff; color: #2b4f9e; }
-.badge.e9 { background: #eceef1; color: #5a6472; text-decoration: line-through; }
-.kpi.k9 b { color: var(--muted); }
 .plan.cancel { background: #eceef1; color: #5a6472; }
 .btn.peligro { background: var(--rojo); border-color: var(--rojo); }
 .btn.peligro:hover { background: #a52626; }

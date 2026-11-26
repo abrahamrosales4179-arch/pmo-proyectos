@@ -35,7 +35,10 @@ const esAdmin = () => rol() === 'Administrador';
 const puedeEditar = () => !!rol() && !['Consulta', 'Sin rol'].includes(rol());
 const puedeCrear = () => ['Comercial', 'Administrador'].includes(rol());
 const badgeEtapa = (e) => `<span class="badge e${num(e)}">${esc(e)}</span>`;
-const vencido = (p) => p.fecha_compromiso && p.fecha_compromiso < hoyISO() && num(p.etapa) < 8;
+// Números clave del flujo (ver supabase/005_etapas.sql)
+const N_FINAL = 14, N_CANCEL = 99, N_APROB = 3, N_PEP = 4, N_LIC_DESDE = 6, N_CONST = 11;
+const activa = (p) => num(p.etapa) < N_FINAL;
+const vencido = (p) => p.fecha_compromiso && p.fecha_compromiso < hoyISO() && activa(p);
 const actividadesDe = (etapa) => S.actividades.filter((a) => a.etapa === etapa).sort((a, b) => a.orden - b.orden || a.id - b.id);
 const cerrada = (st) => st === 'Hecha' || st === 'No aplica';
 
@@ -122,8 +125,8 @@ async function cargarCatalogos() {
 // ---------------------------------------------------------------------
 // Gantt: se calcula hacia atrás desde la fecha requerida de gas
 // ---------------------------------------------------------------------
-const ETAPAS_ANTES = [1, 2, 3, 4, 5, 6];   // terminan el día que se requiere el gas
-const ETAPAS_DESPUES = [7];             // ocurren después de la puesta en servicio
+const ETAPAS_ANTES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]; // terminan el día que se requiere el gas
+const ETAPAS_DESPUES = [];                                         // etapas que se cuentan después del gas
 const DIA = 86400000;
 function diaDe(x) {
   if (x instanceof Date) { const d = new Date(x); d.setHours(12, 0, 0, 0); return d; }
@@ -153,7 +156,7 @@ function calcConst(d) {
 const puedeEstimarConst = () => ['Construcción', 'Líder', 'Administrador'].includes(rol());
 
 // Semanas de una etapa para un proyecto: en Construcción usa la estimación del supervisor si existe
-const semanasPlan = (p, etapa) => (num(etapa) === 5 && p.const_semanas != null ? Number(p.const_semanas) : semanasDe(p.segmento, etapa));
+const semanasPlan = (p, etapa) => (num(etapa) === N_CONST && p.const_semanas != null ? Number(p.const_semanas) : semanasDe(p.segmento, etapa));
 const totalSemanas = (seg) => ETAPAS_ANTES.reduce((a, n) => a + semanasDe(seg, etapaPorNum(n)), 0);
 const nombreCorto = (e) => e.replace(/^\d+\.\s*/, '');
 const diasFlujo = (etapa) => {
@@ -190,8 +193,8 @@ function planDe(p) {
 function estadoPlan(p, plan = planDe(p)) {
   if (!plan) return null;
   const n = num(p.etapa);
-  if (n === 9) return { clase: 'cancel', texto: 'Cancelado' };
-  if (n >= 8) return { clase: 'ok', texto: 'Entregado' };
+  if (n === N_CANCEL) return { clase: 'cancel', texto: 'Cancelado' };
+  if (n >= N_FINAL) return { clase: 'ok', texto: 'Entregado' };
   const fila = plan.filas.find((f) => f.n === Math.max(1, n));
   if (!fila) return null;
   const dias = Math.round((fila.fin - diaDe(hoyISO())) / DIA);
@@ -343,10 +346,10 @@ function enMiBandeja(p) {
     case 'Administrador':
     case 'Consulta': return true;
     case 'Comercial': return p.solicitante_id === me;
-    case 'Líder': return n === 1;
-    case 'Proyectista': return p.proyectista_id === me && (n === 2 || n === 3 || (n === 4 && S.flujoListo && !p.elemento_pep));
-    case 'Permisos': return n === 4;
-    case 'Construcción': return n >= 5 && n <= 7;
+    case 'Líder': return n === 1 || n === 9;
+    case 'Proyectista': return p.proyectista_id === me && [2, 4, 5, 6, 7, 10].includes(n);
+    case 'Permisos': return n === 8 || n === 9;
+    case 'Construcción': return n >= 11 && n <= 13;
     default: return false;
   }
 }
@@ -408,7 +411,7 @@ function tablaProyectos(lista) {
         <td>${esc(p.nombre)}${p.bloqueo ? ' <span class="bloq" title="' + esc(p.bloqueo) + '">⚠ Bloqueo</span>' : ''}</td>
         <td>${esc(p.municipio)}</td>
         <td>${esc(p.segmento)}${p.segmento === 'Industrial' ? ' · ' + esc(p.material) : ''}</td>
-        <td>${badgeEtapa(p.etapa)}${num(p.etapa) === 2 && p.factibilidad === 'En revisión' ? ' <span class="pill">Por aprobar Ventas</span>' : ''}</td>
+        <td>${badgeEtapa(p.etapa)}${num(p.etapa) === N_APROB ? ' <span class="pill">Por aprobar KAM</span>' : ''}</td>
         <td>${p.proyectista_id ? esc(nombreDe(p.proyectista_id)) : '<span class="muted">—</span>'}</td>
         <td>${fecha(p.fecha_requerida_gas)}</td>
         <td>${pillPlan(estadoPlan(p))}</td>
@@ -441,17 +444,17 @@ async function vistaGanttGeneral() {
   const pintar = () => {
     const q = f.q.trim().toLowerCase();
     const base = todos.filter(({ p }) =>
-      (f.entregados || num(p.etapa) < 8) && (!f.seg || p.segmento === f.seg) &&
+      (f.entregados || activa(p)) && (!f.seg || p.segmento === f.seg) &&
       (!q || [p.folio, p.nombre, p.municipio].some((x) => (x || '').toLowerCase().includes(q))));
     const conPlan = base.filter((x) => x.plan);
     const sinFecha = base.filter((x) => !x.plan);
-    const cuenta = (c) => conPlan.filter((x) => x.st?.clase === c && num(x.p.etapa) < 8).length;
+    const cuenta = (c) => conPlan.filter((x) => x.st?.clase === c && activa(x.p)).length;
     const kpi = (clave, n, txt, extra = '') => `<button class="kpi ${extra} ${f.estado === clave ? 'activo' : ''}" data-estado="${clave}"><b>${n}</b><span>${txt}</span></button>`;
     $('#ggKpis').innerHTML = kpi('', base.length, 'Proyectos') + kpi('ok', cuenta('ok'), 'A tiempo', 'gk-ok') +
       kpi('riesgo', cuenta('riesgo'), 'En riesgo', 'gk-riesgo') + kpi('mal', cuenta('mal'), 'Atrasados', 'alerta') +
       kpi('sin', sinFecha.length, 'Sin fecha de gas', 'k0');
 
-    let filas = f.estado === 'sin' ? [] : conPlan.filter((x) => !f.estado || (x.st?.clase === f.estado && num(x.p.etapa) < 8));
+    let filas = f.estado === 'sin' ? [] : conPlan.filter((x) => !f.estado || (x.st?.clase === f.estado && activa(x.p)));
     filas = filas.sort((a, b) => a.plan.req - b.plan.req);
     const listaSin = !f.estado || f.estado === 'sin' ? sinFecha : [];
 
@@ -485,7 +488,7 @@ function ganttGeneralHtml(filas) {
 
   const html = filas.map(({ p, plan, st }) => {
     const n = num(p.etapa);
-    const actual = n >= 8 ? 99 : Math.max(1, n);
+    const actual = n >= N_FINAL ? 999 : Math.max(1, n);
     const segs = plan.filas.map((s) => {
       const clase = s.n < actual ? 'hecho' : s.n === actual ? `actual ${st?.clase || ''}` : 'futuro';
       return `<div class="gg-seg ${clase} ${s.despues ? 'post' : ''}" style="left:${pct(s.inicio)}%;width:${ancho(s.inicio, s.fin)}%"
@@ -649,33 +652,49 @@ function puedeActualizar(p) {
 }
 const gestionaLicencias = () => ['Administrador', 'Líder', 'Permisos'].includes(rol());
 
+// Avance de cada etapa a la siguiente: quién lo hace y qué se revisa antes
+const AVANCES = {
+  0: { roles: ['Comercial'], label: 'Reenviar al Líder', docs: '1. Solicitud' },
+  1: { roles: ['Líder'], label: 'Asignar proyectista', id: 'asignar', sinDocs: true },
+  2: { roles: ['Proyectista'], label: 'Enviar a aprobación comercial (KAM)', omiteAct: 'Aprobación de factibilidad' },
+  3: { roles: ['Comercial'], label: 'Aprobar factibilidad' },
+  4: { roles: ['Proyectista'], label: 'PEP obtenido: pasar a Dictamen de diseño', pep: true },
+  5: { roles: ['Proyectista'], label: 'Dictamen obtenido: pasar a Expediente de permisos' },
+  6: { roles: ['Proyectista'], label: 'Enviar expediente al DRO' },
+  7: { roles: ['Proyectista'], label: 'DRO sin correcciones: enviar a Licencias' },
+  8: { roles: ['Permisos'], label: 'Licencias obtenidas: pasar a Socialización', lic: true },
+  9: { roles: ['Permisos', 'Líder'], label: 'Zona liberada: pasar a Carpeta técnica' },
+  10: { roles: ['Proyectista'], label: 'Entregar carpeta técnica a Construcción' },
+  11: { roles: ['Construcción'], label: 'Obra terminada: pasar a Cierre y as-built' },
+  12: { roles: ['Construcción'], label: 'Pasar a Puesta en servicio' },
+  13: { roles: ['Construcción'], label: 'Gas en servicio: entregar a O&M' },
+};
+// Regresos y cancelación (siempre con motivo)
+const REGRESOS = [
+  { de: 1, a: 0, roles: ['Líder'], id: 'devolver', label: 'Devolver a Comercial' },
+  { de: 3, a: 2, roles: ['Comercial'], label: 'Pedir cambios al anteproyecto' },
+  { de: 3, a: N_CANCEL, roles: ['Comercial'], id: 'cancelar', label: 'No aprobar (cancelar proyecto)', peligro: true },
+  { de: 7, a: 6, roles: ['Proyectista'], label: 'DRO con correcciones: regresar a Expediente' },
+  { de: 11, a: 10, roles: ['Construcción'], label: 'Carpeta incompleta: regresar a Proyectos' },
+];
+
 function accionesDe(p) {
   const r = rol(), me = S.perfil.id, n = num(p.etapa), adm = esAdmin(), out = [];
-  const flujo = S.flujoListo;
-  if (n === 1 && (adm || r === 'Líder')) {
-    out.push({ id: 'asignar', label: 'Asignar proyectista', destino: etapaPorNum(flujo ? 2 : 3) });
-    out.push({ id: 'devolver', label: 'Devolver a Comercial', destino: etapaPorNum(0), sec: true });
+  // Proyectista solo en sus proyectos; Comercial solo en sus solicitudes
+  const puede = (roles) => adm || (roles.includes(r)
+    && (r !== 'Proyectista' || p.proyectista_id === me)
+    && (r !== 'Comercial' || p.solicitante_id === me));
+  const av = AVANCES[n];
+  if (av && puede(av.roles)) {
+    out.push({
+      id: av.id || 'avanzar', label: av.label, destino: etapaPorNum(n + 1),
+      revisaDocs: av.sinDocs ? null : (av.docs || p.etapa), revisaAct: av.sinDocs ? null : p.etapa, omiteAct: av.omiteAct,
+      revisaLic: !!av.lic, revisaPep: !!av.pep,
+    });
   }
-  if (n === 0 && (adm || (r === 'Comercial' && p.solicitante_id === me)))
-    out.push({ id: 'avanzar', label: 'Reenviar al Líder', destino: etapaPorNum(1), revisaDocs: '1. Solicitud' });
-  if (n === 2 && flujo) {
-    const proy = adm || (r === 'Proyectista' && p.proyectista_id === me);
-    const ventas = adm || (r === 'Comercial' && p.solicitante_id === me);
-    if (p.factibilidad !== 'En revisión' && proy)
-      out.push({ id: 'factEnviar', label: 'Enviar factibilidad a Ventas', revisaDocs: p.etapa, revisaAct: p.etapa, omiteAct: 'Aprobación de factibilidad' });
-    if (p.factibilidad === 'En revisión' && ventas) {
-      out.push({ id: 'avanzar', label: 'Aprobar factibilidad', destino: etapaPorNum(3), revisaDocs: p.etapa });
-      out.push({ id: 'factCambios', label: 'Pedir cambios', sec: true });
-      out.push({ id: 'cancelar', label: 'No aprobar (cancelar proyecto)', destino: etapaPorNum(9), sec: true, peligro: true });
-    }
-  }
-  if (n === 3 && (adm || (r === 'Proyectista' && p.proyectista_id === me)))
-    out.push({ id: 'avanzar', label: 'Enviar a Permisos', destino: etapaPorNum(4), revisaDocs: p.etapa, revisaAct: p.etapa });
-  if (n === 4 && (adm || r === 'Permisos'))
-    out.push({ id: 'avanzar', label: 'Enviar a Construcción', destino: etapaPorNum(5), revisaDocs: p.etapa, revisaLic: true, revisaPep: flujo, revisaAct: p.etapa });
-  if (n >= 5 && n <= 7 && (adm || r === 'Construcción'))
-    out.push({ id: 'avanzar', label: `Avanzar a «${siguienteEtapa(p.etapa)}»`, destino: siguienteEtapa(p.etapa), revisaDocs: p.etapa, revisaAct: p.etapa });
-  if (flujo && n >= 3 && n < 8 && (adm || (r === 'Proyectista' && p.proyectista_id === me)))
+  for (const g of REGRESOS.filter((x) => x.de === n && puede(x.roles)))
+    out.push({ id: g.id || 'regresar', label: g.label, destino: etapaPorNum(g.a), sec: true, peligro: !!g.peligro });
+  if (n >= N_PEP && n < N_FINAL && (adm || (r === 'Proyectista' && p.proyectista_id === me)))
     out.push({ id: 'pep', label: p.elemento_pep ? 'Corregir Elemento PEP' : 'Registrar Elemento PEP', sec: !!p.elemento_pep });
   if (adm) out.push({ id: 'mover', label: 'Mover a otra etapa', sec: true });
   if (puedeEditar()) out.push({ id: 'comentar', label: 'Agregar comentario', sec: true });
@@ -717,8 +736,8 @@ async function vistaDetalle(id) {
   const licPendientes = lics.filter((l) => l.estatus !== 'Aprobada');
 
   // Etapas cuyos documentos se muestran
-  const nVista = n === 9 ? 2 : Math.max(1, n); // un cancelado muestra hasta la factibilidad
-  const etapasDocs = ETAPAS.filter((e) => num(e) >= 1 && num(e) <= Math.min(nVista, 8));
+  const nVista = n === N_CANCEL ? N_APROB : Math.max(1, n); // un cancelado muestra hasta la aprobación comercial
+  const etapasDocs = ETAPAS.filter((e) => num(e) >= 1 && num(e) <= Math.min(nVista, N_FINAL));
   const idsConfig = new Set();
   const bloqueDocs = etapasDocs.map((e) => {
     const lista = docsDe(e, p.segmento, p.material);
@@ -746,9 +765,9 @@ async function vistaDetalle(id) {
   }
 
   const acciones = accionesDe(p);
-  const stepper = ETAPAS.filter((e) => num(e) >= 1 && num(e) <= 8).map((e) => {
+  const stepper = ETAPAS.filter((e) => num(e) >= 1 && num(e) <= N_FINAL).map((e) => {
     const k = num(e);
-    const cls = n === 9 ? (k <= 2 ? 'hecho' : '') : n === 0 ? (k === 1 ? 'actual devuelto' : '') : k < n ? 'hecho' : k === n ? 'actual' : '';
+    const cls = n === N_CANCEL ? (k < N_APROB ? 'hecho' : '') : n === 0 ? (k === 1 ? 'actual devuelto' : '') : k < n ? 'hecho' : k === n ? 'actual' : '';
     return `<li class="${cls}"><span>${k}</span><small>${esc(e.replace(/^\d+\.\s*/, ''))}</small></li>`;
   }).join('');
 
@@ -767,11 +786,9 @@ async function vistaDetalle(id) {
            ${ganttHtml(p, plan, realesDe(p, hist))}`}
     </section>
     ${n === 0 ? `<div class="aviso">Devuelta a Comercial. Revisa el historial para ver el motivo, corrige y reenvía.</div>` : ''}
-    ${n === 9 ? `<div class="aviso">Proyecto cancelado (factibilidad no aprobada por Ventas). El motivo está en el historial.</div>` : ''}
-    ${n === 2 && S.flujoListo ? (p.factibilidad === 'En revisión'
-      ? `<div class="aviso">Factibilidad técnico-económica <b>en revisión por Ventas</b> (tiempo objetivo: 2 días). Ventas la aprueba, pide cambios o la rechaza.</div>`
-      : `<div class="nota ok">Ingeniería y factibilidad: el proyectista elabora plano, modelo hidráulico, ficha de inversión y formato de factibilidad; al terminar la envía a Ventas.</div>`) : ''}
-    ${S.flujoListo && n >= 3 && n < 8 && !p.elemento_pep ? `<div class="aviso">Falta el <b>Elemento PEP</b> (lo registra el proyectista tras gestionarlo con Inversiones). Sin él no se puede entrar a Construcción.</div>` : ''}
+    ${n === N_CANCEL ? `<div class="aviso">Proyecto cancelado (factibilidad no aprobada por el área comercial). El motivo está en el historial.</div>` : ''}
+    ${n === N_APROB ? `<div class="aviso">Factibilidad técnico-económica <b>en revisión por el área comercial (KAM)</b> (tiempo objetivo: 2 días): la aprueba, pide cambios al anteproyecto o cancela el proyecto.</div>` : ''}
+    ${n >= N_PEP && n < N_FINAL && !p.elemento_pep ? `<div class="aviso">Falta el <b>Elemento PEP</b> (lo registra el proyectista tras gestionarlo con Inversiones). Sin él no se puede pasar a Dictamen de diseño.</div>` : ''}
 
     <div class="cols">
       <div class="col">
@@ -781,7 +798,7 @@ async function vistaDetalle(id) {
 
         ${S.flujoListo ? `<section class="card" id="cardActividades"></section>` : ''}
 
-        ${S.constListo && n >= 1 && n <= 8 ? '<section class="card" id="cardConst"></section>' : ''}
+        ${S.constListo && n >= 1 && n <= N_FINAL ? '<section class="card" id="cardConst"></section>' : ''}
 
         <section class="card">
           <div class="card-h"><h2>Expediente</h2></div>
@@ -793,7 +810,7 @@ async function vistaDetalle(id) {
           </div>
         </section>
 
-        ${(n >= 3 && n !== 9) || lics.length ? `<section class="card">
+        ${(n >= N_LIC_DESDE && n !== N_CANCEL) || lics.length ? `<section class="card">
           <h2>Licencias y permisos</h2>
           ${lics.length ? `<div class="tabla-wrap"><table class="tabla compacta"><thead><tr><th>Tipo</th><th>Dependencia</th><th>Estatus</th><th>Ingreso</th><th>Vence</th><th>Notas</th>${esAdmin() ? '<th></th>' : ''}</tr></thead><tbody>
             ${lics.map((l) => `<tr>
@@ -869,13 +886,13 @@ async function vistaDetalle(id) {
         <small><span class="area">${esc(a.area)}</span>${a.dias != null ? ` · ${Number(a.dias)} día${Number(a.dias) === 1 ? '' : 's'}` : ''}${a.entregables ? ` · ${esc(a.entregables)}` : ''}</small>
         ${reg && st !== 'Pendiente' ? `<small class="muted">${esc(st)} · ${esc(nombreDe(reg.usuario_id))} · ${fecha(reg.updated_at)}</small>` : ''}
       </div>
-      ${puedeEditar() && n !== 9 ? `<select class="act-sel" data-act="${a.id}">${ESTATUS_ACT.map((x) => `<option ${x === st ? 'selected' : ''}>${x}</option>`).join('')}</select>` : `<small class="muted">${esc(st)}</small>`}
+      ${puedeEditar() && n !== N_CANCEL ? `<select class="act-sel" data-act="${a.id}">${ESTATUS_ACT.map((x) => `<option ${x === st ? 'selected' : ''}>${x}</option>`).join('')}</select>` : `<small class="muted">${esc(st)}</small>`}
     </div>`;
   };
   const pintarActividades = () => {
     if (!cardAct) return;
-    const etapasAct = ETAPAS.filter((e) => num(e) >= 1 && num(e) <= Math.min(nVista, 8));
-    const actual = n >= 1 && n <= 8 ? p.etapa : null;
+    const etapasAct = ETAPAS.filter((e) => num(e) >= 1 && num(e) <= Math.min(nVista, N_FINAL));
+    const actual = n >= 1 && n <= N_FINAL ? p.etapa : null;
     const resumen = (lista) => `${lista.filter((x) => cerrada(estAct(x))).length}/${lista.length}`;
     const delActual = actual ? actividadesDe(actual) : [];
     const abiertas = new Set($$('details[open]', cardAct).map((d) => d.dataset.e));
@@ -918,8 +935,8 @@ async function vistaDetalle(id) {
       <label>Fecha de creación del PEP<input type="date" name="fecha_pep" value="${esc(p.fecha_pep || hoyISO())}"></label>`;
     if (a.id === 'mover') extra = `<label>Nueva etapa *<select name="etapa" required>${ETAPAS.filter((e) => e !== p.etapa).map((e) => `<option>${esc(e)}</option>`).join('')}</select></label>`;
 
-    const requiereComentario = ['devolver', 'comentar', 'cancelar', 'factCambios'].includes(a.id);
-    const etiquetaCom = { devolver: 'Motivo de la devolución *', cancelar: 'Motivo por el que no se aprueba *', factCambios: 'Cambios que necesita la factibilidad *' }[a.id] || (requiereComentario ? 'Comentario *' : 'Comentario (opcional)');
+    const requiereComentario = ['devolver', 'comentar', 'cancelar', 'regresar'].includes(a.id);
+    const etiquetaCom = { devolver: 'Motivo de la devolución *', cancelar: 'Motivo por el que no se aprueba *', regresar: 'Motivo / qué se debe corregir *' }[a.id] || (requiereComentario ? 'Comentario *' : 'Comentario (opcional)');
     $('#accionForm').innerHTML = `<form class="accion">
       <h3>${esc(a.label)}</h3>
       ${pendDocs.length ? `<div class="aviso">Faltan documentos obligatorios: <b>${pendDocs.map((d) => esc(d.nombre)).join(', ')}</b></div>` : ''}
@@ -949,8 +966,6 @@ async function vistaDetalle(id) {
           const cambios = { comentario_cambio: fd.comentario?.trim() || null };
           if (a.id === 'asignar') { cambios.proyectista_id = fd.proyectista_id; cambios.etapa = a.destino; }
           else if (a.id === 'mover') cambios.etapa = fd.etapa;
-          else if (a.id === 'factEnviar') cambios.factibilidad = 'En revisión';
-          else if (a.id === 'factCambios') cambios.factibilidad = 'En elaboración';
           else if (a.id === 'pep') { cambios.elemento_pep = fd.elemento_pep.trim(); cambios.fecha_pep = fd.fecha_pep || null; }
           else cambios.etapa = a.destino;
           r = await sb.from('proyectos').update(cambios).eq('id', p.id).select('id');
@@ -990,7 +1005,7 @@ async function vistaDetalle(id) {
   const cardConst = $('#cardConst');
   const pintarConst = (editando = false) => {
     if (!cardConst) return;
-    const etapaC = etapaPorNum(5);
+    const etapaC = etapaPorNum(N_CONST);
     const estandar = semanasDe(p.segmento, etapaC);
     const tiene = p.const_semanas != null;
     const det = p.const_detalle || {};
@@ -1005,7 +1020,7 @@ async function vistaDetalle(id) {
         ? `<p>Estimado por supervisión: <b>${Number(p.const_semanas)} semanas</b> (estándar ${esc(p.segmento)}: ${estandar}; ${Number(p.const_semanas) - estandar >= 0 ? '+' : ''}${Math.round((Number(p.const_semanas) - estandar) * 10) / 10} sem). El Gantt ya usa este tiempo.</p>
            ${resumenCalc ? `<p>${resumenCalc}</p>` : ''}${p.const_nota ? `<p class="pre chico">${esc(p.const_nota)}</p>` : ''}`
         : `<p class="muted chico">El Gantt usa el tiempo estándar del segmento (${estandar} semanas). El supervisor de obra puede afinarlo con su estimación o con un cálculo por diámetro, material y longitud.</p>`) +
-        (puedeEstimarConst() && n < 8 ? `<div class="botones"><button class="btn sec chico" id="btnConst">${tiene ? 'Actualizar estimación' : 'Estimar tiempo de construcción'}</button></div>` : '');
+        (puedeEstimarConst() && n < N_FINAL ? `<div class="botones"><button class="btn sec chico" id="btnConst">${tiene ? 'Actualizar estimación' : 'Estimar tiempo de construcción'}</button></div>` : '');
       const b = $('#btnConst');
       if (b) b.onclick = () => pintarConst(true);
       return;
@@ -1171,7 +1186,7 @@ async function vistaAdmin() {
   if (!esAdmin()) { location.hash = '#/inicio'; return; }
   const v = vista('Cargando…');
   try { await cargarCatalogos(); } catch (e) { v.innerHTML = `<p class="error">${esc(errorTxt(e))}</p>`; return; }
-  const etapasDoc = ETAPAS.filter((e) => num(e) >= 1);
+  const etapasDoc = ETAPAS.filter((e) => num(e) >= 1 && num(e) < N_FINAL);
   const docsOrden = [...S.configDocs].sort((a, b) => ETAPAS.indexOf(a.etapa) - ETAPAS.indexOf(b.etapa) || a.orden - b.orden);
 
   v.innerHTML = `
@@ -1214,7 +1229,7 @@ async function vistaAdmin() {
 
     <section class="card">
       <h2>Tiempos por etapa (semanas)</h2>
-      ${S.ganttListo ? `<p class="muted chico">El Gantt parte de la fecha requerida de gas y resta estas semanas hacia atrás. «Cierre y as-built» se cuenta después de la puesta en servicio.</p>
+      ${S.ganttListo ? `<p class="muted chico">El Gantt parte de la fecha requerida de gas y resta estas semanas hacia atrás. La última, «Puesta en servicio», termina el día que se requiere el gas.</p>
       ${S.flujoListo ? '<p class="muted chico">«Flujograma» = suma de los días objetivo de las actividades de esa etapa (solo las que tienen días); úsalo como referencia para validar las semanas.</p>' : ''}
       <div class="tabla-wrap"><table class="tabla compacta"><thead><tr><th>Etapa</th>${SEGMENTOS.map((s) => `<th>${s}</th>`).join('')}${S.flujoListo ? '<th>Flujograma</th>' : ''}</tr></thead><tbody>
       ${[...ETAPAS_ANTES, ...ETAPAS_DESPUES].map(etapaPorNum).filter(Boolean).map((e) => `<tr><td>${esc(e)}</td>${SEGMENTOS.map((s) =>
