@@ -7,6 +7,9 @@ import { SUPABASE_URL, SUPABASE_ANON_KEY, NOMBRE_APP, ETAPAS } from './config.js
 const ROLES = ['Administrador', 'Consulta', 'Comercial', 'Líder', 'Proyectista', 'Permisos', 'Construcción', 'Sin rol'];
 const ESTATUS_ACT = ['Pendiente', 'En proceso', 'Hecha', 'No aplica'];
 const SEGMENTOS = ['Residencial', 'Comercial', 'Industrial'];
+const PUESTOS = ['KAM', 'Supervisor de ventas'];
+// Quién aprueba el anteproyecto (etapa 3): Industrial → KAM; Comercial y Residencial → Supervisor de ventas
+const aprobadorDe = (segmento) => (segmento === 'Industrial' ? 'KAM' : 'Supervisor de ventas');
 const MATERIALES = ['Polietileno', 'Acero'];
 const ESTATUS_LIC = ['Pendiente', 'En trámite', 'Aprobada', 'Rechazada'];
 const BUCKET = 'expedientes';
@@ -34,6 +37,9 @@ const rol = () => S.perfil?.rol;
 const esAdmin = () => rol() === 'Administrador';
 const puedeEditar = () => !!rol() && !['Consulta', 'Sin rol'].includes(rol());
 const puedeCrear = () => ['Comercial', 'Administrador'].includes(rol());
+const puedoAprobar = (p) => esAdmin() || (puedeEditar() && S.perfil?.puesto === aprobadorDe(p.segmento));
+const firmaAprobacion = (p) => (p.aprobado_por
+  ? `${esc(nombreDe(p.aprobado_por))} (${esc(p.aprobado_puesto || '—')}) · ${fecha(p.aprobado_en)}` : '');
 const badgeEtapa = (e) => `<span class="badge e${num(e)}">${esc(e)}</span>`;
 // Números clave del flujo (ver supabase/005_etapas.sql)
 const N_FINAL = 14, N_CANCEL = 99, N_APROB = 3, N_PEP = 4, N_LIC_DESDE = 6, N_CONST = 11;
@@ -101,7 +107,7 @@ async function cargarCatalogos() {
   const [mun, docs, pers] = await Promise.all([
     sb.from('municipios').select('*').order('nombre'),
     sb.from('config_documentos').select('*').order('orden'),
-    sb.from('perfiles').select('id,email,nombre,rol,activo').order('nombre'),
+    sb.from('perfiles').select('*').order('nombre'),
   ]);
   const e = mun.error || docs.error || pers.error;
   if (e) throw e;
@@ -342,6 +348,7 @@ function router() {
 function enMiBandeja(p) {
   const me = S.perfil.id;
   const n = num(p.etapa);
+  if (n === N_APROB && S.perfil.puesto && S.perfil.puesto === aprobadorDe(p.segmento)) return true;
   switch (rol()) {
     case 'Administrador':
     case 'Consulta': return true;
@@ -411,7 +418,7 @@ function tablaProyectos(lista) {
         <td>${esc(p.nombre)}${p.bloqueo ? ' <span class="bloq" title="' + esc(p.bloqueo) + '">⚠ Bloqueo</span>' : ''}</td>
         <td>${esc(p.municipio)}</td>
         <td>${esc(p.segmento)}${p.segmento === 'Industrial' ? ' · ' + esc(p.material) : ''}</td>
-        <td>${badgeEtapa(p.etapa)}${num(p.etapa) === N_APROB ? ' <span class="pill">Por aprobar KAM</span>' : ''}</td>
+        <td>${badgeEtapa(p.etapa)}${num(p.etapa) === N_APROB ? ` <span class="pill">Por aprobar ${esc(aprobadorDe(p.segmento))}</span>` : ''}</td>
         <td>${p.proyectista_id ? esc(nombreDe(p.proyectista_id)) : '<span class="muted">—</span>'}</td>
         <td>${fecha(p.fecha_requerida_gas)}</td>
         <td>${pillPlan(estadoPlan(p))}</td>
@@ -656,8 +663,8 @@ const gestionaLicencias = () => ['Administrador', 'Líder', 'Permisos'].includes
 const AVANCES = {
   0: { roles: ['Comercial'], label: 'Reenviar al Líder', docs: '1. Solicitud' },
   1: { roles: ['Líder'], label: 'Asignar proyectista', id: 'asignar', sinDocs: true },
-  2: { roles: ['Proyectista'], label: 'Enviar a aprobación comercial (KAM)', omiteAct: 'Aprobación de factibilidad' },
-  3: { roles: ['Comercial'], label: 'Aprobar factibilidad' },
+  2: { roles: ['Proyectista'], label: 'Enviar a aprobación comercial', omiteAct: 'Aprobación de factibilidad' },
+  3: { roles: ['Aprobador'], label: 'Aprobar anteproyecto' },   // KAM o Supervisor de ventas según segmento
   4: { roles: ['Proyectista'], label: 'PEP obtenido: pasar a Dictamen de diseño', pep: true },
   5: { roles: ['Proyectista'], label: 'Dictamen obtenido: pasar a Expediente de permisos' },
   6: { roles: ['Proyectista'], label: 'Enviar expediente al DRO' },
@@ -672,8 +679,8 @@ const AVANCES = {
 // Regresos y cancelación (siempre con motivo)
 const REGRESOS = [
   { de: 1, a: 0, roles: ['Líder'], id: 'devolver', label: 'Devolver a Comercial' },
-  { de: 3, a: 2, roles: ['Comercial'], label: 'Pedir cambios al anteproyecto' },
-  { de: 3, a: N_CANCEL, roles: ['Comercial'], id: 'cancelar', label: 'No aprobar (cancelar proyecto)', peligro: true },
+  { de: 3, a: 2, roles: ['Aprobador'], label: 'Pedir cambios al anteproyecto' },
+  { de: 3, a: N_CANCEL, roles: ['Aprobador'], id: 'cancelar', label: 'No aprobar (cancelar proyecto)', peligro: true },
   { de: 7, a: 6, roles: ['Proyectista'], label: 'DRO con correcciones: regresar a Expediente' },
   { de: 11, a: 10, roles: ['Construcción'], label: 'Carpeta incompleta: regresar a Proyectos' },
 ];
@@ -681,7 +688,7 @@ const REGRESOS = [
 function accionesDe(p) {
   const r = rol(), me = S.perfil.id, n = num(p.etapa), adm = esAdmin(), out = [];
   // Proyectista solo en sus proyectos; Comercial solo en sus solicitudes
-  const puede = (roles) => adm || (roles.includes(r)
+  const puede = (roles) => adm || (roles.includes('Aprobador') && puedoAprobar(p)) || (roles.includes(r)
     && (r !== 'Proyectista' || p.proyectista_id === me)
     && (r !== 'Comercial' || p.solicitante_id === me));
   const av = AVANCES[n];
@@ -810,7 +817,7 @@ async function vistaDetalle(id, pestana) {
     <ol class="stepper">${stepper}</ol>
     ${n === 0 ? `<div class="aviso">Devuelta a Comercial. Revisa el historial para ver el motivo, corrige y reenvía.</div>` : ''}
     ${n === N_CANCEL ? `<div class="aviso">Proyecto cancelado (factibilidad no aprobada por el área comercial). El motivo está en el historial.</div>` : ''}
-    ${n === N_APROB ? `<div class="aviso">Factibilidad técnico-económica <b>en revisión por el área comercial (KAM)</b> (tiempo objetivo: 2 días): la aprueba, pide cambios al anteproyecto o cancela el proyecto.</div>` : ''}
+    ${n === N_APROB ? `<div class="aviso">Factibilidad técnico-económica <b>en revisión por el ${esc(aprobadorDe(p.segmento))}</b> (tiempo objetivo: 2 días): lo aprueba, pide cambios al anteproyecto o cancela el proyecto.</div>` : ''}
     ${n >= N_PEP && n < N_FINAL && !p.elemento_pep ? `<div class="aviso">Falta el <b>Elemento PEP</b> (lo registra el proyectista tras gestionarlo con Inversiones). Sin él no se puede pasar a Dictamen de diseño.</div>` : ''}
 
     <nav class="tabs" role="tablist">${PESTANAS.map(([k, t]) => `<button role="tab" data-tab="${k}" class="${k === pest ? 'activa' : ''}">${t}${marca[k] || ''}</button>`).join('')}</nav>
@@ -843,6 +850,7 @@ async function vistaDetalle(id, pestana) {
               <dt>Solicitante</dt><dd>${esc(nombreDe(p.solicitante_id))}</dd>
               <dt>Proyectista</dt><dd>${p.proyectista_id ? esc(nombreDe(p.proyectista_id)) : '—'}</dd>
               ${S.flujoListo ? `<dt>Factibilidad</dt><dd>${esc(p.factibilidad || '—')}</dd>
+              ${p.aprobado_por ? `<dt>Anteproyecto</dt><dd>Aprobado por: ${firmaAprobacion(p)}</dd>` : ''}
               <dt>Elemento PEP</dt><dd>${p.elemento_pep ? `${esc(p.elemento_pep)}${p.fecha_pep ? ` <small class="muted">(${fecha(p.fecha_pep)})</small>` : ''}` : '<span class="muted">Pendiente</span>'}</dd>` : ''}
               <dt>Creado</dt><dd>${fechaHora(p.created_at)}</dd>
             </dl>
@@ -1361,12 +1369,14 @@ async function vistaAdmin() {
 
     <section class="card">
       <h2>Usuarios y roles</h2>
-      <p class="muted chico">Para dar de alta a alguien: Supabase → Authentication → Users → <b>Add user</b> (correo + contraseña, marca «Auto confirm»). Después aparece aquí y le asignas su rol.</p>
-      <div class="tabla-wrap"><table class="tabla compacta"><thead><tr><th>Correo</th><th>Nombre</th><th>Rol</th><th>Activo</th></tr></thead><tbody>
+      <p class="muted chico">Para dar de alta a alguien: Supabase → Authentication → Users → <b>Add user</b> (correo + contraseña, marca «Auto confirm»). Después aparece aquí y le asignas su rol.
+        El <b>puesto</b> define quién aprueba el anteproyecto: Industrial → KAM; Comercial y Residencial → Supervisor de ventas.</p>
+      <div class="tabla-wrap"><table class="tabla compacta"><thead><tr><th>Correo</th><th>Nombre</th><th>Rol</th>${'puesto' in S.perfil ? '<th>Puesto</th>' : ''}<th>Activo</th></tr></thead><tbody>
       ${S.perfiles.map((u) => `<tr>
         <td>${esc(u.email)}</td>
         <td><input data-nombre="${u.id}" value="${esc(u.nombre || '')}"></td>
         <td><select data-rol="${u.id}" ${u.id === S.perfil.id ? 'disabled title="No puedes cambiar tu propio rol"' : ''}>${ROLES.map((r) => `<option ${r === u.rol ? 'selected' : ''}>${r}</option>`).join('')}</select></td>
+        ${'puesto' in S.perfil ? `<td><select data-puesto="${u.id}"><option value="">—</option>${PUESTOS.map((x) => `<option ${x === u.puesto ? 'selected' : ''}>${x}</option>`).join('')}</select></td>` : ''}
         <td><input type="checkbox" data-activo="${u.id}" ${u.activo ? 'checked' : ''} ${u.id === S.perfil.id ? 'disabled' : ''}></td>
       </tr>`).join('')}
       </tbody></table></div>
@@ -1443,6 +1453,10 @@ async function vistaAdmin() {
     await cargarCatalogos();
   };
   $$('[data-rol]', v).forEach((s) => (s.onchange = () => guardar('perfiles', 'id', s.dataset.rol, { rol: s.value }, 'Rol actualizado')));
+  $$('[data-puesto]', v).forEach((s) => (s.onchange = async () => {
+    await guardar('perfiles', 'id', s.dataset.puesto, { puesto: s.value || null }, 'Puesto actualizado');
+    if (s.dataset.puesto === S.perfil.id) S.perfil.puesto = s.value || null;
+  }));
   $$('[data-activo]', v).forEach((c) => (c.onchange = () => guardar('perfiles', 'id', c.dataset.activo, { activo: c.checked })));
   $$('[data-nombre]', v).forEach((i) => (i.onchange = () => guardar('perfiles', 'id', i.dataset.nombre, { nombre: i.value.trim() || null })));
   $$('[data-oblig]', v).forEach((c) => (c.onchange = () => guardar('config_documentos', 'id', Number(c.dataset.oblig), { obligatorio: c.checked })));

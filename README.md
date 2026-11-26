@@ -64,6 +64,7 @@ Ejecuta en el SQL Editor de Supabase, una sola vez y en orden, los scripts que t
 3. `supabase/004_construccion.sql` – el Elemento PEP lo registra el proyectista (ya no hay rol Inversiones) y se agrega la estimación del tiempo de construcción con su tabla de rendimientos.
 4. `supabase/005_etapas.sql` – flujo de 14 etapas (expediente de permisos aparte de la carpeta técnica); mueve proyectos, historial, documentos, actividades y tiempos a las etapas nuevas.
 5. `supabase/006_avance_obra.sql` – reportes de avance de obra.
+6. `supabase/007_aprobacion_anteproyecto.sql` – el anteproyecto lo aprueba el KAM (Industrial) o el Supervisor de ventas (Comercial y Residencial); queda registrado quién lo aprobó.
 
 Mientras no se ejecute el 003, la app sigue funcionando con el flujo anterior (1 → 3).
 
@@ -93,6 +94,7 @@ supabase/003_flujograma.sql   Actualización: flujo según el Flujograma de Proy
 supabase/004_construccion.sql Actualización: PEP por proyectista y tiempo de construcción
 supabase/005_etapas.sql      Actualización: flujo de 14 etapas
 supabase/006_avance_obra.sql Actualización: avance de obra
+supabase/007_aprobacion_anteproyecto.sql Actualización: aprobación del anteproyecto por puesto
 ```
 
 ## Siguientes pasos sugeridos
