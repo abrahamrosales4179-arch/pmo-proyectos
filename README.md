@@ -20,6 +20,8 @@ Plataforma web para dar de alta solicitudes de proyectos, subir su expediente y 
 | Seguimiento | Fecha compromiso (se marca en rojo si está vencida), bloqueo actual y siguiente acción. |
 | Gantt | Parte de la **fecha requerida de gas** y calcula hacia atrás cuándo debe empezar y terminar cada etapa, según las semanas por segmento (editables en Administración). Muestra plan contra real, línea de hoy y de gas requerido, y marca cada proyecto como A tiempo, En riesgo o Atrasado. Al capturar la solicitud avisa si la fecha no alcanza y propone la más próxima posible. |
 | Tiempo de construcción | El supervisor de obra (rol Construcción), el Líder o el Administrador afina el tiempo de la etapa 5 de cada proyecto: **manual** en semanas o **calculado por tramos** (material, diámetro y longitud ÷ rendimiento en m/día por cuadrilla, entre el número de cuadrillas, más días adicionales). El Gantt del proyecto y el general usan esa estimación en lugar del estándar del segmento. Los rendimientos se editan en Administración. |
+| Pestañas del proyecto | Resumen (acciones, Gantt, datos, seguimiento) · Expediente (documentos y licencias) · Actividades (checklist del flujograma) · Construcción (avance de obra, tiempo de construcción e información para obra: PEP, licencias, dictamen, expediente y carpeta técnica) · Historial. Los supervisores abren directo en Construcción. |
+| Avance de obra | Construcción, Líder o Administrador reportan el % de avance (o metros instalados por tramo, que calculan el %). La app proyecta la fecha de término al ritmo real y la compara con el plan. Cada reporte queda en el historial. |
 | Historial | Se registra solo: creación, cambios de etapa, asignaciones y comentarios, con usuario y fecha. |
 | Administración | Roles y usuarios activos, documentos requeridos por etapa/segmento/material, tiempos por etapa (con la referencia de días del flujograma), municipios y claves. |
 
@@ -61,6 +63,7 @@ Ejecuta en el SQL Editor de Supabase, una sola vez y en orden, los scripts que t
 2. `supabase/003_flujograma.sql` – alineación con el Flujograma de Proyectos: etapa 2 y aprobación de Ventas, estado Cancelado, rol Inversiones y Elemento PEP, actividades del proceso, documentos requeridos del flujograma (reemplaza los de ejemplo que no tengan archivos) y tiempo de la etapa 2.
 3. `supabase/004_construccion.sql` – el Elemento PEP lo registra el proyectista (ya no hay rol Inversiones) y se agrega la estimación del tiempo de construcción con su tabla de rendimientos.
 4. `supabase/005_etapas.sql` – flujo de 14 etapas (expediente de permisos aparte de la carpeta técnica); mueve proyectos, historial, documentos, actividades y tiempos a las etapas nuevas.
+5. `supabase/006_avance_obra.sql` – reportes de avance de obra.
 
 Mientras no se ejecute el 003, la app sigue funcionando con el flujo anterior (1 → 3).
 
@@ -84,11 +87,12 @@ index.html            Página
 app.js                Lógica (pantallas, flujo, subida de archivos)
 config.js             Conexión a Supabase y etapas
 styles.css            Estilos
-supabase/schema.sql   Instalación nueva: todo (incluye 002 a 005)
+supabase/schema.sql   Instalación nueva: todo (incluye 002 a 006)
 supabase/002_gantt.sql        Actualización: Gantt
 supabase/003_flujograma.sql   Actualización: flujo según el Flujograma de Proyectos
 supabase/004_construccion.sql Actualización: PEP por proyectista y tiempo de construcción
 supabase/005_etapas.sql      Actualización: flujo de 14 etapas
+supabase/006_avance_obra.sql Actualización: avance de obra
 ```
 
 ## Siguientes pasos sugeridos

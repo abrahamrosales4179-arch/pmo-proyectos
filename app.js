@@ -326,11 +326,11 @@ function pantallaPrincipal() {
 
 function router() {
   if (!S.perfil || !$('#vista')) return;
-  const [, ruta = 'inicio', id] = (location.hash || '#/inicio').split('/');
+  const [, ruta = 'inicio', id, pestana] = (location.hash || '#/inicio').split('/');
   $$('nav a, .usuario a').forEach((a) => a.classList.toggle('activo', a.dataset.r === ruta));
   if (ruta === 'nueva') return vistaNueva();
   if (ruta === 'gantt') return vistaGanttGeneral();
-  if (ruta === 'p' && id) return vistaDetalle(id);
+  if (ruta === 'p' && id) return vistaDetalle(id, pestana);
   if (ruta === 'admin') return vistaAdmin();
   if (ruta === 'cuenta') return vistaCuenta();
   return vistaInicio();
@@ -701,15 +701,22 @@ function accionesDe(p) {
   return out;
 }
 
-async function vistaDetalle(id) {
+const PESTANAS = [
+  ['resumen', 'Resumen'], ['expediente', 'Expediente'], ['actividades', 'Actividades'],
+  ['construccion', 'Construcción'], ['historial', 'Historial'],
+];
+async function vistaDetalle(id, pestana) {
   const v = vista('Cargando proyecto…');
-  const [rp, rd, rh, rl, ra] = await Promise.all([
+  const [rp, rd, rh, rl, ra, rav] = await Promise.all([
     sb.from('proyectos').select('*').eq('id', id).maybeSingle(),
     sb.from('documentos').select('*').eq('proyecto_id', id).order('created_at'),
     sb.from('historial').select('*').eq('proyecto_id', id).order('created_at', { ascending: false }),
     sb.from('licencias').select('*').eq('proyecto_id', id).order('created_at'),
     S.flujoListo ? sb.from('proyecto_actividades').select('*').eq('proyecto_id', id) : Promise.resolve({ data: [] }),
+    sb.from('avance_obra').select('*').eq('proyecto_id', id).order('fecha', { ascending: false }).order('id', { ascending: false }),
   ]);
+  const avanceListo = !rav.error; // false si aún no se ejecuta supabase/006_avance_obra.sql
+  const avances = rav.data || [];
   const err = rp.error || rd.error || rh.error || rl.error || ra.error;
   if (err) { v.innerHTML = `<p class="error">${esc(errorTxt(err))}</p>`; return; }
   const p = rp.data;
@@ -747,16 +754,16 @@ async function vistaDetalle(id) {
   }).join('');
   const sueltos = docs.filter((x) => !idsConfig.has(x.config_doc_id));
 
-  function filaDoc(d, archivos) {
+  function filaDoc(d, archivos, soloVer = false) {
     return `<div class="doc">
       <span class="estado ${archivos.length ? 'ok' : d.obligatorio ? 'pend' : 'opc'}">${archivos.length ? '✓' : d.obligatorio ? '!' : '·'}</span>
       <div class="doc-info"><b>${esc(d.nombre)}</b><small>${d.obligatorio ? 'Obligatorio' : 'Opcional'}</small>
-        <div class="files">${archivos.map(archivoHtml).join('')}</div></div>
-      ${subir ? `<label class="btn sec chico">Subir<input type="file" multiple hidden data-subir="${d.id}"></label>` : ''}
+        <div class="files">${archivos.map((a) => archivoHtml(a, soloVer)).join('')}</div></div>
+      ${subir && !soloVer ? `<label class="btn sec chico">Subir<input type="file" multiple hidden data-subir="${d.id}"></label>` : ''}
     </div>`;
   }
-  function archivoHtml(a) {
-    const borrar = esAdmin() || a.subido_por === S.perfil.id;
+  function archivoHtml(a, soloVer = false) {
+    const borrar = !soloVer && (esAdmin() || a.subido_por === S.perfil.id);
     return `<div class="archivo">
       ${urls[a.ruta] ? `<a href="${esc(urls[a.ruta])}" target="_blank" rel="noopener">${esc(a.nombre_archivo)}</a>` : esc(a.nombre_archivo)}
       <small class="muted">${tamano(a.tamano)} · ${esc(nombreDe(a.subido_por))} · ${fecha(a.created_at)}</small>
@@ -771,13 +778,50 @@ async function vistaDetalle(id) {
     return `<li class="${cls}"><span>${k}</span><small>${esc(e.replace(/^\d+\.\s*/, ''))}</small></li>`;
   }).join('');
 
+  // Pestaña inicial: la de la URL, la última usada o la natural para el rol
+  S.pestanaDet = S.pestanaDet || {};
+  const pestDefault = rol() === 'Construcción' && n >= 10 && n < N_FINAL ? 'construccion' : 'resumen';
+  let pest = PESTANAS.some(([k]) => k === pestana) ? pestana : S.pestanaDet[id] || pestDefault;
+
+  // Indicadores en las pestañas
+  const faltanAhora = n >= 1 && n < N_FINAL ? faltantes(p.etapa).length : 0;
+  const actAhora = n >= 1 && n <= N_FINAL ? actividadesDe(p.etapa) : [];
+  const actHechas = actAhora.filter((x) => cerrada(estAct(x))).length;
+  const ultAvance = avances[0];
+  const marca = {
+    expediente: faltanAhora ? `<span class="tab-n alerta">${faltanAhora}</span>` : '',
+    actividades: actAhora.length ? `<span class="tab-n">${actHechas}/${actAhora.length}</span>` : '',
+    construccion: ultAvance ? `<span class="tab-n">${Number(ultAvance.porcentaje)}%</span>` : '',
+  };
+
+  // Información para obra: documentos de diseño, permisos y carpeta técnica (solo consulta)
+  const etapasObra = [5, 6, 8, 9, 10].map(etapaPorNum).filter(Boolean);
+  const docsObra = etapasObra.map((e) => {
+    const lista = docsDe(e, p.segmento, p.material);
+    if (!lista.length) return '';
+    return `<h3>${esc(nombreCorto(e))}</h3>` + lista.map((d) => filaDoc(d, docs.filter((x) => x.config_doc_id === d.id), true)).join('');
+  }).join('');
+
   v.innerHTML = `
     <a class="volver" href="#/inicio">← Volver</a>
     <div class="titulo">
       <div><h1>${esc(p.folio)} · ${esc(p.nombre)}</h1><div>${badgeEtapa(p.etapa)} ${p.bloqueo ? '<span class="bloq">⚠ Bloqueado</span>' : ''}</div></div>
     </div>
     <ol class="stepper">${stepper}</ol>
-    <section class="card">
+    ${n === 0 ? `<div class="aviso">Devuelta a Comercial. Revisa el historial para ver el motivo, corrige y reenvía.</div>` : ''}
+    ${n === N_CANCEL ? `<div class="aviso">Proyecto cancelado (factibilidad no aprobada por el área comercial). El motivo está en el historial.</div>` : ''}
+    ${n === N_APROB ? `<div class="aviso">Factibilidad técnico-económica <b>en revisión por el área comercial (KAM)</b> (tiempo objetivo: 2 días): la aprueba, pide cambios al anteproyecto o cancela el proyecto.</div>` : ''}
+    ${n >= N_PEP && n < N_FINAL && !p.elemento_pep ? `<div class="aviso">Falta el <b>Elemento PEP</b> (lo registra el proyectista tras gestionarlo con Inversiones). Sin él no se puede pasar a Dictamen de diseño.</div>` : ''}
+
+    <nav class="tabs" role="tablist">${PESTANAS.map(([k, t]) => `<button role="tab" data-tab="${k}" class="${k === pest ? 'activa' : ''}">${t}${marca[k] || ''}</button>`).join('')}</nav>
+
+    <div class="tab-panel" data-panel="resumen">
+    <div class="cols">
+      <div class="col">
+        ${acciones.length ? `<section class="card"><h2>Acciones</h2>
+          <div class="botones">${acciones.map((a, i) => `<button class="btn ${a.sec ? 'sec' : ''}" data-accion="${i}">${esc(a.label)}</button>`).join('')}</div>
+          <div id="accionForm"></div></section>` : ''}
+        <section class="card">
       <div class="card-h"><h2>Cronograma (Gantt)</h2>${pillPlan(estPlan)}</div>
       ${!S.ganttListo ? '<p class="muted">Falta ejecutar <b>supabase/002_gantt.sql</b> en Supabase para activar el Gantt.</p>'
         : !plan ? `<p class="muted">Captura la <b>fecha requerida de gas</b> en Seguimiento para calcular el cronograma.</p>`
@@ -785,31 +829,53 @@ async function vistaDetalle(id) {
             ${plan.holgura >= 0 ? `Holgura al recibir la solicitud: <b>${Math.round(plan.holgura / 7 * 10) / 10} semanas</b>` : `<span class="vencido">Llegó ${Math.round(-plan.holgura / 7 * 10) / 10} semanas tarde para los tiempos estándar</span>`}</p>
            ${ganttHtml(p, plan, realesDe(p, hist))}`}
     </section>
-    ${n === 0 ? `<div class="aviso">Devuelta a Comercial. Revisa el historial para ver el motivo, corrige y reenvía.</div>` : ''}
-    ${n === N_CANCEL ? `<div class="aviso">Proyecto cancelado (factibilidad no aprobada por el área comercial). El motivo está en el historial.</div>` : ''}
-    ${n === N_APROB ? `<div class="aviso">Factibilidad técnico-económica <b>en revisión por el área comercial (KAM)</b> (tiempo objetivo: 2 días): la aprueba, pide cambios al anteproyecto o cancela el proyecto.</div>` : ''}
-    ${n >= N_PEP && n < N_FINAL && !p.elemento_pep ? `<div class="aviso">Falta el <b>Elemento PEP</b> (lo registra el proyectista tras gestionarlo con Inversiones). Sin él no se puede pasar a Dictamen de diseño.</div>` : ''}
+      </div>
+      <div class="col">
+        <section class="card">
+          <div class="card-h"><h2>Datos</h2>${editable && (esAdmin() || n === 0) ? '<button class="link" id="btnEditarDatos">Editar</button>' : ''}</div>
+          <div id="datos">
+            <dl class="datos">
+              <dt>Municipio</dt><dd>${esc(p.municipio)}</dd>
+              <dt>Segmento</dt><dd>${esc(p.segmento)}</dd>
+              <dt>Material</dt><dd>${esc(p.material)}</dd>
+              <dt>Dirección</dt><dd>${esc(p.direccion) || '—'}</dd>
+              <dt>Descripción</dt><dd class="pre">${esc(p.descripcion) || '—'}</dd>
+              <dt>Solicitante</dt><dd>${esc(nombreDe(p.solicitante_id))}</dd>
+              <dt>Proyectista</dt><dd>${p.proyectista_id ? esc(nombreDe(p.proyectista_id)) : '—'}</dd>
+              ${S.flujoListo ? `<dt>Factibilidad</dt><dd>${esc(p.factibilidad || '—')}</dd>
+              <dt>Elemento PEP</dt><dd>${p.elemento_pep ? `${esc(p.elemento_pep)}${p.fecha_pep ? ` <small class="muted">(${fecha(p.fecha_pep)})</small>` : ''}` : '<span class="muted">Pendiente</span>'}</dd>` : ''}
+              <dt>Creado</dt><dd>${fechaHora(p.created_at)}</dd>
+            </dl>
+          </div>
+        </section>
+        <section class="card">
+          <h2>Seguimiento</h2>
+          <form id="frmSeg" class="grid mini">
+            ${S.ganttListo ? `<label>Fecha requerida de gas<input type="date" name="fecha_requerida_gas" value="${esc(p.fecha_requerida_gas || '')}" ${editable ? '' : 'disabled'}></label>` : ''}
+            <label>Fecha compromiso<input type="date" name="fecha_compromiso" value="${esc(p.fecha_compromiso || '')}" ${editable ? '' : 'disabled'}></label>
+            <label class="full">Bloqueo actual<input name="bloqueo" value="${esc(p.bloqueo || '')}" placeholder="Ninguno" ${editable ? '' : 'disabled'}></label>
+            <label class="full">Siguiente acción<input name="siguiente_accion" value="${esc(p.siguiente_accion || '')}" ${editable ? '' : 'disabled'}></label>
+            ${editable ? '<div class="full"><button class="btn sec chico">Guardar seguimiento</button></div>' : ''}
+          </form>
+        </section>
+      </div>
+    </div>
+    </div>
 
+    <div class="tab-panel" data-panel="expediente">
     <div class="cols">
       <div class="col">
-        ${acciones.length ? `<section class="card"><h2>Acciones</h2>
-          <div class="botones">${acciones.map((a, i) => `<button class="btn ${a.sec ? 'sec' : ''}" data-accion="${i}">${esc(a.label)}</button>`).join('')}</div>
-          <div id="accionForm"></div></section>` : ''}
-
-        ${S.flujoListo ? `<section class="card" id="cardActividades"></section>` : ''}
-
-        ${S.constListo && n >= 1 && n <= N_FINAL ? '<section class="card" id="cardConst"></section>' : ''}
-
         <section class="card">
           <div class="card-h"><h2>Expediente</h2></div>
           ${bloqueDocs || '<p class="muted">No hay documentos configurados.</p>'}
           <h3>Otros archivos</h3>
           <div class="doc"><span class="estado opc">+</span>
-            <div class="doc-info"><div class="files">${sueltos.map(archivoHtml).join('') || '<small class="muted">Sin archivos</small>'}</div></div>
+            <div class="doc-info"><div class="files">${sueltos.map((a) => archivoHtml(a)).join('') || '<small class="muted">Sin archivos</small>'}</div></div>
             ${subir ? '<label class="btn sec chico">Subir<input type="file" multiple hidden data-subir=""></label>' : ''}
           </div>
         </section>
-
+      </div>
+      <div class="col">
         ${(n >= N_LIC_DESDE && n !== N_CANCEL) || lics.length ? `<section class="card">
           <h2>Licencias y permisos</h2>
           ${lics.length ? `<div class="tabla-wrap"><table class="tabla compacta"><thead><tr><th>Tipo</th><th>Dependencia</th><th>Estatus</th><th>Ingreso</th><th>Vence</th><th>Notas</th>${esAdmin() ? '<th></th>' : ''}</tr></thead><tbody>
@@ -831,37 +897,40 @@ async function vistaDetalle(id) {
           </form>` : ''}
         </section>` : ''}
       </div>
+    </div>
+    </div>
 
+    <div class="tab-panel" data-panel="actividades">
+      ${S.flujoListo ? `<section class="card" id="cardActividades"></section>` : '<p class="muted">Las actividades del flujograma no están configuradas.</p>'}
+    </div>
+
+    <div class="tab-panel" data-panel="construccion">
+    <div class="cols">
+      <div class="col">
+        ${avanceListo ? '<section class="card" id="cardAvance"></section>' : '<section class="card"><h2>Avance de obra</h2><p class="muted">Falta ejecutar <b>supabase/006_avance_obra.sql</b> en Supabase.</p></section>'}
+        ${S.constListo && n >= 1 && n <= N_FINAL ? '<section class="card" id="cardConst"></section>' : ''}
+      </div>
       <div class="col">
         <section class="card">
-          <div class="card-h"><h2>Datos</h2>${editable && (esAdmin() || n === 0) ? '<button class="link" id="btnEditarDatos">Editar</button>' : ''}</div>
-          <div id="datos">
-            <dl class="datos">
-              <dt>Municipio</dt><dd>${esc(p.municipio)}</dd>
-              <dt>Segmento</dt><dd>${esc(p.segmento)}</dd>
-              <dt>Material</dt><dd>${esc(p.material)}</dd>
-              <dt>Dirección</dt><dd>${esc(p.direccion) || '—'}</dd>
-              <dt>Descripción</dt><dd class="pre">${esc(p.descripcion) || '—'}</dd>
-              <dt>Solicitante</dt><dd>${esc(nombreDe(p.solicitante_id))}</dd>
-              <dt>Proyectista</dt><dd>${p.proyectista_id ? esc(nombreDe(p.proyectista_id)) : '—'}</dd>
-              ${S.flujoListo ? `<dt>Factibilidad</dt><dd>${esc(p.factibilidad || '—')}</dd>
-              <dt>Elemento PEP</dt><dd>${p.elemento_pep ? `${esc(p.elemento_pep)}${p.fecha_pep ? ` <small class="muted">(${fecha(p.fecha_pep)})</small>` : ''}` : '<span class="muted">Pendiente</span>'}</dd>` : ''}
-              <dt>Creado</dt><dd>${fechaHora(p.created_at)}</dd>
-            </dl>
-          </div>
+          <h2>Información para obra</h2>
+          <dl class="datos">
+            <dt>Dirección</dt><dd>${esc(p.direccion) || '—'}</dd>
+            <dt>Municipio</dt><dd>${esc(p.municipio)}</dd>
+            <dt>Segmento / material</dt><dd>${esc(p.segmento)} · ${esc(p.material)}</dd>
+            <dt>Proyectista</dt><dd>${p.proyectista_id ? esc(nombreDe(p.proyectista_id)) : '—'}</dd>
+            <dt>Elemento PEP</dt><dd>${p.elemento_pep ? esc(p.elemento_pep) : '<span class="vencido">Pendiente</span>'}</dd>
+            <dt>Gas requerido</dt><dd>${fecha(p.fecha_requerida_gas) || '—'}</dd>
+          </dl>
+          <h3>Licencias</h3>
+          ${lics.length ? `<ul class="lista-lic">${lics.map((l) => `<li><span class="lic ${esc(l.estatus.replace(' ', ''))}">${esc(l.estatus)}</span> ${esc(l.tipo)}${l.dependencia ? ` · <small class="muted">${esc(l.dependencia)}</small>` : ''}
+            ${l.fecha_vencimiento ? `<small class="${l.fecha_vencimiento < hoyISO() ? 'vencido' : 'muted'}"> · vence ${fecha(l.fecha_vencimiento)}</small>` : ''}</li>`).join('')}</ul>` : '<p class="muted chico">Sin licencias registradas.</p>'}
+          ${docsObra || '<p class="muted">No hay documentos configurados.</p>'}
         </section>
+      </div>
+    </div>
+    </div>
 
-        <section class="card">
-          <h2>Seguimiento</h2>
-          <form id="frmSeg" class="grid mini">
-            ${S.ganttListo ? `<label>Fecha requerida de gas<input type="date" name="fecha_requerida_gas" value="${esc(p.fecha_requerida_gas || '')}" ${editable ? '' : 'disabled'}></label>` : ''}
-            <label>Fecha compromiso<input type="date" name="fecha_compromiso" value="${esc(p.fecha_compromiso || '')}" ${editable ? '' : 'disabled'}></label>
-            <label class="full">Bloqueo actual<input name="bloqueo" value="${esc(p.bloqueo || '')}" placeholder="Ninguno" ${editable ? '' : 'disabled'}></label>
-            <label class="full">Siguiente acción<input name="siguiente_accion" value="${esc(p.siguiente_accion || '')}" ${editable ? '' : 'disabled'}></label>
-            ${editable ? '<div class="full"><button class="btn sec chico">Guardar seguimiento</button></div>' : ''}
-          </form>
-        </section>
-
+    <div class="tab-panel" data-panel="historial">
         <section class="card">
           <h2>Historial</h2>
           <ul class="timeline">${hist.map((h) => `<li>
@@ -870,8 +939,20 @@ async function vistaDetalle(id) {
             ${h.comentario ? `<p class="pre">${esc(h.comentario)}</p>` : ''}
           </li>`).join('') || '<li class="muted">Sin movimientos</li>'}</ul>
         </section>
-      </div>
     </div>`;
+
+  // Pestañas
+  const mostrar = (k) => {
+    pest = k; S.pestanaDet[id] = k;
+    $$('.tabs [data-tab]', v).forEach((b) => b.classList.toggle('activa', b.dataset.tab === k));
+    $$('.tab-panel', v).forEach((x) => (x.hidden = x.dataset.panel !== k));
+    history.replaceState(null, '', `#/p/${id}/${k}`);
+  };
+  $$('.tabs [data-tab]', v).forEach((b) => (b.onclick = () => mostrar(b.dataset.tab)));
+  mostrar(pest);
+  // En pantallas angostas, centrar la etapa actual en la barra de etapas
+  const stp = $('.stepper', v), liAct = $('.stepper li.actual', v);
+  if (stp && liAct) stp.scrollLeft = liAct.offsetLeft - stp.clientWidth / 2 + liAct.clientWidth / 2;
 
   const recargar = () => vistaDetalle(id);
 
@@ -1113,6 +1194,92 @@ async function vistaDetalle(id) {
     dibujar();
   };
   pintarConst();
+
+  // --- Avance de obra (supervisores)
+  const cardAvance = $('#cardAvance');
+  const pintarAvance = (editando = false) => {
+    if (!cardAvance) return;
+    const tramos = (p.const_detalle?.tramos || []).filter((t) => Number(t.longitud) > 0);
+    const ult = avances[0];
+    const pctAct = ult ? Number(ult.porcentaje) : 0;
+    const puedeReportar = ['Construcción', 'Líder', 'Administrador'].includes(rol()) && n >= 10 && n < N_FINAL;
+
+    // Proyección: ritmo real desde que empezó la etapa de Construcción
+    const etapaC = etapaPorNum(N_CONST);
+    const inicioObra = realesDe(p, hist)[etapaC]?.inicio || null;
+    const finPlan = plan?.filas.find((f) => f.n === N_CONST)?.fin || null;
+    let proyeccion = '';
+    if (ult && inicioObra && pctAct > 0 && pctAct < 100) {
+      const dias = Math.max(1, Math.round((diaDe(ult.fecha) - inicioObra) / DIA));
+      const finEst = sumaDias(diaDe(ult.fecha), Math.round(((100 - pctAct) / pctAct) * dias));
+      const dif = finPlan ? Math.round((finEst - finPlan) / DIA / 7 * 10) / 10 : null;
+      proyeccion = `<p>Al ritmo actual (${Math.round(pctAct / dias * 7 * 10) / 10} % por semana) la obra terminaría el <b>${fecha(isoDe(finEst))}</b>${dif == null ? '' : dif > 0
+        ? ` · <span class="vencido">${dif} sem después del plan</span>` : ` · <span class="ok-txt">${-dif} sem antes del plan</span>`}.</p>`;
+    } else if (pctAct >= 100) proyeccion = '<p class="ok-txt"><b>Obra terminada.</b></p>';
+    else if (!inicioObra) proyeccion = '<p class="muted chico">La proyección se calcula cuando el proyecto entra a Construcción y se reporta el primer avance.</p>';
+
+    const barra = `<div class="progreso"><div style="width:${Math.min(100, pctAct)}%"></div></div>`;
+    const metrosTxt = ult?.detalle?.length ? (() => {
+      const tot = ult.detalle.reduce((t, x) => t + Number(x.longitud || 0), 0);
+      const ins = ult.detalle.reduce((t, x) => t + Math.min(Number(x.instalado || 0), Number(x.longitud || 0)), 0);
+      return ` · ${ins.toLocaleString('es-MX')} de ${tot.toLocaleString('es-MX')} m`;
+    })() : '';
+    const encabezado = `<div class="card-h"><h2>Avance de obra</h2>${ult ? `<span class="pill ${pctAct >= 100 ? 'ok' : ''}">${pctAct}%</span>` : ''}</div>`;
+
+    if (!editando) {
+      cardAvance.innerHTML = encabezado + `${barra}
+        <p>${ult ? `Último reporte: <b>${pctAct}%</b>${metrosTxt} · ${fecha(ult.fecha)} · ${esc(nombreDe(ult.usuario_id))}` : '<span class="muted">Sin reportes de avance.</span>'}</p>
+        ${proyeccion}
+        ${puedeReportar ? '<div class="botones"><button class="btn chico" id="btnAvance">Reportar avance</button></div>' : (n < 10 ? '<p class="muted chico">El avance se reporta a partir de la Carpeta técnica.</p>' : '')}
+        ${avances.length ? `<h3>Reportes</h3><div class="tabla-wrap"><table class="tabla compacta"><thead><tr><th>Fecha</th><th>Avance</th><th>Quién</th><th>Nota</th>${esAdmin() ? '<th></th>' : ''}</tr></thead><tbody>
+          ${avances.map((x) => `<tr><td>${fecha(x.fecha)}</td><td><b>${Number(x.porcentaje)}%</b></td><td>${esc(nombreDe(x.usuario_id))}</td><td>${esc(x.nota || '')}</td>
+            ${esAdmin() ? `<td><button class="link rojo" data-borraravance="${x.id}">✕</button></td>` : ''}</tr>`).join('')}
+        </tbody></table></div>` : ''}`;
+      const b = $('#btnAvance'); if (b) b.onclick = () => pintarAvance(true);
+      $$('[data-borraravance]', cardAvance).forEach((x) => (x.onclick = async () => {
+        if (!confirm('¿Eliminar este reporte de avance?')) return;
+        const { error } = await sb.from('avance_obra').delete().eq('id', x.dataset.borraravance);
+        if (error) return fallo(error);
+        recargar();
+      }));
+      return;
+    }
+
+    // Formulario: por tramos (si hay estimación por tramos) o porcentaje directo
+    const prev = new Map((ult?.detalle || []).map((x) => [`${x.material}|${x.diametro}|${x.longitud}`, Number(x.instalado || 0)]));
+    cardAvance.innerHTML = encabezado + `<form id="frmAvance" class="grid mini">
+      <label>Fecha del reporte<input type="date" name="fecha" value="${hoyISO()}" max="${hoyISO()}" required></label>
+      ${tramos.length ? `<div class="full"><div class="tabla-wrap"><table class="tabla compacta"><thead><tr><th>Tramo</th><th>Longitud (m)</th><th>Instalado (m, acumulado)</th></tr></thead><tbody>
+          ${tramos.map((t, i) => `<tr><td>${esc(t.material)} ${esc(t.diametro)}</td><td>${Number(t.longitud).toLocaleString('es-MX')}</td>
+            <td><input type="number" min="0" max="${Number(t.longitud)}" step="1" data-inst="${i}" value="${prev.get(`${t.material}|${t.diametro}|${t.longitud}`) ?? ''}"></td></tr>`).join('')}
+        </tbody></table></div>
+        <p class="muted chico">El % se calcula con los metros instalados. Puedes ajustarlo si hay trabajos que no son tendido (pruebas, interconexión).</p></div>` : ''}
+      <label>Avance (%) *<input type="number" name="porcentaje" min="0" max="100" step="0.1" value="${pctAct || ''}" required></label>
+      <label class="full">Nota<textarea name="nota" rows="2" placeholder="Ej. tramo 2 en zanja, falta cruce de avenida"></textarea></label>
+      <div class="full botones"><button type="button" class="btn sec chico" id="btnAvCancel">Cancelar</button><button class="btn chico">Guardar avance</button></div>
+    </form>`;
+    const f = $('#frmAvance');
+    const recalcular = () => {
+      const tot = tramos.reduce((t, x) => t + Number(x.longitud), 0);
+      const ins = tramos.reduce((t, x, i) => t + Math.min(Number($(`[data-inst="${i}"]`, f).value || 0), Number(x.longitud)), 0);
+      if (tot) f.elements.porcentaje.value = Math.round((ins / tot) * 1000) / 10;
+    };
+    $$('[data-inst]', f).forEach((x) => (x.oninput = recalcular));
+    $('#btnAvCancel').onclick = () => pintarAvance(false);
+    f.onsubmit = async (ev) => {
+      ev.preventDefault();
+      if (!f.reportValidity()) return;
+      const detalle = tramos.length ? tramos.map((t, i) => ({ material: t.material, diametro: t.diametro, longitud: Number(t.longitud), instalado: Number($(`[data-inst="${i}"]`, f).value || 0) })) : null;
+      const { error } = await sb.from('avance_obra').insert({
+        proyecto_id: p.id, fecha: f.elements.fecha.value, porcentaje: Number(f.elements.porcentaje.value),
+        detalle, nota: f.elements.nota.value.trim() || null, usuario_id: S.perfil.id,
+      });
+      if (error) return fallo(error);
+      toast('Avance guardado');
+      recargar();
+    };
+  };
+  pintarAvance();
 
   // --- Seguimiento
   const frmSeg = $('#frmSeg');

@@ -244,3 +244,20 @@ input.corto { width: 70px; }
 .seg-ctrl { display: flex; gap: 1rem; flex-wrap: wrap; font-size: .9rem; }
 .seg-ctrl label { display: flex; align-items: center; gap: .35rem; cursor: pointer; }
 .seg-ctrl input { width: auto; }
+
+/* Pestañas del proyecto */
+.tabs { display: flex; gap: .25rem; border-bottom: 2px solid var(--borde); margin: .5rem 0 1rem; overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.tabs button { font: inherit; font-weight: 600; font-size: .92rem; color: var(--muted); background: none; border: 0; border-bottom: 3px solid transparent;
+  margin-bottom: -2px; padding: .6rem .9rem; cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: .4rem; }
+.tabs button:hover { color: var(--texto); }
+.tabs button.activa { color: var(--azul); border-bottom-color: var(--azul); }
+.tab-n { font-size: .72rem; font-weight: 700; background: #eef1f5; color: #3b4656; border-radius: 99px; padding: .05rem .45rem; }
+.tab-n.alerta { background: #fdecd5; color: #8a5300; }
+.tab-panel[hidden] { display: none; }
+
+/* Avance de obra */
+.progreso { height: 12px; background: #eef1f5; border-radius: 99px; overflow: hidden; margin: .3rem 0 .6rem; }
+.progreso > div { height: 100%; background: var(--ok); border-radius: 99px; transition: width .3s; }
+.ok-txt { color: var(--ok); }
+.lista-lic { list-style: none; padding: 0; margin: 0 0 .8rem; display: grid; gap: .35rem; font-size: .9rem; }
