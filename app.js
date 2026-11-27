@@ -1912,8 +1912,37 @@ async function responder(pregunta) {
     if (!filas.length) return `<b>${titulo}:</b> ninguna.${per?.defecto ? ' <span class="muted">Puedes preguntar por otro periodo, por ejemplo «en los próximos 90 días».</span>' : ''}`;
     return `<b>${titulo}: ${filas.length}</b>` + lista(filas.map(({ l, p, v }) => {
       const dias = Math.round((v - hoy) / DIA);
-      return `${linkP(p, 'expediente')} · ${esc(l.tipo)} <span class="muted">(${esc(l.dependencia || '—')})</span><br><b>${fecha(l.fecha_vencimiento)}</b> · ${dias < 0 ? `<span class="vencido">venció hace ${-dias} días</span>` : dias === 0 ? 'vence hoy' : `faltan ${dias} días`} · ${esc(l.estatus)}`;
+      return `${linkP(p, 'expediente')} · <b>${esc(p.nombre)}</b><br>${esc(l.tipo)} <span class="muted">(${esc(l.dependencia || '—')})</span><br><b>${fecha(l.fecha_vencimiento)}</b> · ${dias < 0 ? `<span class="vencido">venció hace ${-dias} días</span>` : dias === 0 ? 'vence hoy' : `faltan ${dias} días`} · ${esc(l.estatus)}`;
     }));
+  }
+
+  // 1b. Licencias vigentes, en trámite o rechazadas, agrupadas por proyecto
+  if (/licenc|permiso/.test(q) && !/capex|inversion/.test(q)) {
+    const vigente = (l) => l.estatus === 'Aprobada' && (!l.fecha_vencimiento || diaDe(l.fecha_vencimiento) >= hoy);
+    const tipos = [
+      { re: /tramite|pendient|proceso|espera|falta/, f: (l) => ['Pendiente', 'En trámite'].includes(l.estatus), t: 'Licencias en trámite o pendientes' },
+      { re: /rechaz|negad/, f: (l) => l.estatus === 'Rechazada', t: 'Licencias rechazadas' },
+      { re: /vigent|activ|aprobad|valid|tengo|hay|cuales|todas|lista/, f: vigente, t: 'Licencias vigentes' },
+    ];
+    const tipo = tipos.find((x) => x.re.test(q)) || tipos[2];
+    const base = D.lics.filter((l) => D.porId[l.proyecto_id] && enSeg(D.porId[l.proyecto_id]) && (porFolio ? l.proyecto_id === porFolio.id : activa(D.porId[l.proyecto_id])));
+    const filas = base.filter(tipo.f);
+    const titulo = `${tipo.t}${porFolio ? ` de ${linkP(porFolio, 'expediente')}` : ' en proyectos activos'}${txtSeg}`;
+    if (!filas.length) return `<b>${titulo}:</b> ninguna.`;
+    const grupos = {};
+    filas.forEach((l) => (grupos[l.proyecto_id] = grupos[l.proyecto_id] || []).push(l));
+    const proys = Object.keys(grupos).map((id) => D.porId[id]).sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+    const linea = (l) => {
+      const v = l.fecha_vencimiento ? diaDe(l.fecha_vencimiento) : null;
+      const dias = v ? Math.round((v - hoy) / DIA) : null;
+      return `· ${esc(l.tipo)} <span class="muted">(${esc(l.dependencia || '—')})</span>` +
+        (tipo.f === vigente ? (v ? ` · vence <b>${fecha(l.fecha_vencimiento)}</b>${dias <= 30 ? ` <span class="vencido">(${dias} días)</span>` : ''}` : ' · sin vencimiento')
+          : ` · ${esc(l.estatus)}${l.fecha_ingreso ? ` desde ${fecha(l.fecha_ingreso)}` : ''}`);
+    };
+    const resumen = tipo.f === vigente
+      ? ` <span class="muted">(de ${base.length} registradas: ${base.filter((l) => ['Pendiente', 'En trámite'].includes(l.estatus)).length} en trámite, ${base.filter((l) => l.estatus === 'Aprobada' && l.fecha_vencimiento && diaDe(l.fecha_vencimiento) < hoy).length} vencidas)</span>` : '';
+    return `<b>${titulo}: ${filas.length}</b> en ${proys.length} proyecto${proys.length === 1 ? '' : 's'}${resumen}` +
+      lista(proys.map((p) => `${linkP(p, 'expediente')} · <b>${esc(p.nombre)}</b> <span class="muted">${esc(nombreCorto(p.etapa))}</span><br>${grupos[p.id].map(linea).join('<br>')}`), 15);
   }
 
   // 2. CAPEX por periodo
@@ -2012,7 +2041,7 @@ async function responder(pregunta) {
   return null;
 }
 
-const SUGERENCIAS = ['¿Qué licencias vencen en los próximos 30 días?', '¿Cuánto CAPEX voy a ejercer en mayo?', '¿Qué proyectos están atrasados?',
+const SUGERENCIAS = ['¿Qué licencias vencen en los próximos 30 días?', '¿Qué licencias están vigentes?', '¿Cuánto CAPEX voy a ejercer en mayo?', '¿Qué proyectos están atrasados?',
   '¿Qué proyectos requieren gas en diciembre?', '¿Qué anteproyectos faltan por aprobar?', '¿Cuántos proyectos hay por etapa?'];
 
 function montarChat() {
@@ -2031,14 +2060,14 @@ function montarChat() {
   const pintar = (rol_, html) => {
     const d = document.createElement('div'); d.className = `chat-msg ${rol_}`; d.innerHTML = html; msgs.appendChild(d); msgs.scrollTop = msgs.scrollHeight; return d;
   };
-  if (!S.chat.msgs.length) pintar('bot', `Hola, ${esc((S.perfil.nombre || '').split(' ')[0])}. Pregúntame sobre licencias por vencer, CAPEX, proyectos atrasados, fechas de gas, aprobaciones, bloqueos o un folio en particular.`);
+  if (!S.chat.msgs.length) pintar('bot', `Hola, ${esc((S.perfil.nombre || '').split(' ')[0])}. Pregúntame sobre licencias vigentes o por vencer, CAPEX, proyectos atrasados, fechas de gas, aprobaciones, bloqueos o un folio en particular.`);
   const preguntar = async (texto) => {
     if (!texto.trim()) return;
     pintar('yo', esc(texto));
     const esperando = pintar('bot', '<span class="muted">Buscando…</span>');
     try {
       const r = await responder(texto);
-      esperando.innerHTML = r || `No entendí la pregunta. Puedo responder sobre:<ul><li>licencias por vencer o vencidas</li><li>CAPEX de un mes, trimestre o año (y por segmento)</li><li>proyectos atrasados o en riesgo</li><li>proyectos que requieren gas en un periodo</li><li>anteproyectos por aprobar y bloqueos</li><li>estado de un proyecto (por folio o nombre)</li></ul>`;
+      esperando.innerHTML = r || `No entendí la pregunta. Puedo responder sobre:<ul><li>licencias vigentes, en trámite, por vencer o vencidas</li><li>CAPEX de un mes, trimestre o año (y por segmento)</li><li>proyectos atrasados o en riesgo</li><li>proyectos que requieren gas en un periodo</li><li>anteproyectos por aprobar y bloqueos</li><li>estado de un proyecto (por folio o nombre)</li></ul>`;
     } catch (e) { esperando.innerHTML = `<span class="error">${esc(errorTxt(e))}</span>`; }
     msgs.scrollTop = msgs.scrollHeight;
   };
