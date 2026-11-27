@@ -59,6 +59,7 @@ const errorTxt = (e) => e?.message || String(e);
 const fallo = (e) => { console.error(e); toast(errorTxt(e), 'error'); };
 function vista(msg = '') {
   const v = $('#vista');
+  const tip = $('#cxTip'); if (tip) tip.style.display = 'none';
   v.innerHTML = msg ? `<p class="muted">${esc(msg)}</p>` : '';
   window.scrollTo(0, 0);
   return v;
@@ -318,6 +319,7 @@ function pantallaPrincipal() {
     <nav>
       <a href="#/inicio" data-r="inicio">Inicio</a>
       ${S.ganttListo ? '<a href="#/gantt" data-r="gantt">Gantt general</a>' : ''}
+      ${S.ganttListo ? '<a href="#/capex" data-r="capex">CAPEX</a>' : ''}
       ${puedeCrear() ? '<a href="#/nueva" data-r="nueva">Nueva solicitud</a>' : ''}
       ${esAdmin() ? '<a href="#/admin" data-r="admin">Administración</a>' : ''}
     </nav>
@@ -336,6 +338,7 @@ function router() {
   $$('nav a, .usuario a').forEach((a) => a.classList.toggle('activo', a.dataset.r === ruta));
   if (ruta === 'nueva') return vistaNueva();
   if (ruta === 'gantt') return vistaGanttGeneral();
+  if (ruta === 'capex') return vistaCapex();
   if (ruta === 'p' && id) return vistaDetalle(id, pestana);
   if (ruta === 'admin') return vistaAdmin();
   if (ruta === 'cuenta') return vistaCuenta();
@@ -523,6 +526,227 @@ function ganttGeneralHtml(filas) {
 }
 
 // ---------------------------------------------------------------------
+// CAPEX: se reparte en el tiempo según el Gantt (etapa de Construcción)
+// y según el avance de obra reportado por los supervisores
+// ---------------------------------------------------------------------
+const capexListo = (p) => p && 'capex' in p;
+const fmtMXN = (v) => (v == null || v === '' ? '—' : Number(v).toLocaleString('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 0 }));
+const fmtM = (v) => (Math.abs(v) >= 1e6 ? `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 1 })} M` : Math.abs(v) >= 1e3 ? `$${Math.round(v / 1e3).toLocaleString('es-MX')} mil` : `$${Math.round(v)}`);
+const mesClave = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+const mesNombre = (k) => { const [y, m] = k.split('-').map(Number); return new Date(y, m - 1, 1, 12).toLocaleDateString('es-MX', { month: 'short', year: '2-digit' }); };
+
+// Reparte un monto de forma pareja entre dos fechas, por mes
+function repartir(mapa, monto, ini, fin) {
+  if (!(monto > 0)) return;
+  const b = fin.getTime();
+  if (b <= ini.getTime()) { const k = mesClave(ini); mapa[k] = (mapa[k] || 0) + monto; return; }
+  const total = b - ini.getTime();
+  let cur = new Date(ini);
+  while (cur.getTime() < b) {
+    const sig = new Date(cur.getFullYear(), cur.getMonth() + 1, 1, 12).getTime();
+    const hasta = Math.min(sig, b);
+    const k = mesClave(cur);
+    mapa[k] = (mapa[k] || 0) + (monto * (hasta - cur.getTime())) / total;
+    cur = new Date(hasta);
+  }
+}
+
+// plan: CAPEX en las fechas de Construcción del Gantt · real: lo ejercido según los reportes de avance
+// proy: lo que falta, desde hoy hasta el término proyectado al ritmo real (o con la duración del plan)
+function capexDe(p, avances = [], inicioObra = null) {
+  const c = Number(p.capex);
+  const plan = planDe(p);
+  const fc = plan?.filas.find((f) => f.n === N_CONST);
+  if (!c || !fc || num(p.etapa) === N_CANCEL) return null;
+  const hoy = diaDe(hoyISO());
+  const out = { capex: c, plan: {}, real: {}, proy: {}, ejercido: 0, pct: 0, iniPlan: fc.inicio, finPlan: fc.fin, finProy: null };
+  repartir(out.plan, c, fc.inicio, fc.fin);
+  const dur = fc.fin - fc.inicio;
+  const avs = [...avances].sort((a, b) => (a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : a.id - b.id));
+  const n = num(p.etapa);
+  if (avs.length) {
+    let prev = 0;
+    for (const a of avs) {
+      const pc = Math.min(100, Number(a.porcentaje));
+      if (pc > prev) { const k = mesClave(diaDe(a.fecha)); out.real[k] = (out.real[k] || 0) + (c * (pc - prev)) / 100; prev = pc; }
+    }
+    out.pct = prev;
+    const ult = diaDe(avs[avs.length - 1].fecha);
+    if (prev < 100) {
+      let fin;
+      if (inicioObra && prev > 0) fin = sumaDias(ult, Math.round(((100 - prev) / prev) * Math.max(1, (ult - inicioObra) / DIA)));
+      else fin = fc.fin > hoy ? fc.fin : new Date(hoy.getTime() + dur);
+      const desde = ult > hoy ? ult : hoy;
+      if (fin <= desde) fin = sumaDias(desde, 7);
+      out.finProy = fin;
+      repartir(out.proy, (c * (100 - prev)) / 100, desde, fin);
+    } else out.finProy = ult;
+  } else if (n > N_CONST && n <= N_FINAL) {
+    // Obra terminada sin reportes: se asume que se ejerció según el plan
+    Object.assign(out.real, out.plan); out.pct = 100; out.finProy = fc.fin;
+  } else {
+    // Obra sin iniciar: si el plan ya debía haber empezado, se recorre a partir de hoy
+    const ini = inicioObra || (fc.inicio > hoy ? fc.inicio : hoy);
+    const fin = new Date(Math.max(ini.getTime() + dur, hoy.getTime() + 7 * DIA));
+    out.finProy = fin;
+    repartir(out.proy, c, ini > hoy ? ini : hoy, fin);
+  }
+  out.ejercido = Object.values(out.real).reduce((t, x) => t + x, 0);
+  return out;
+}
+
+function sumarCapex(lista) {
+  const tot = { plan: {}, real: {}, proy: {} };
+  for (const x of lista) for (const k of ['plan', 'real', 'proy']) for (const [m, v] of Object.entries(x[k])) tot[k][m] = (tot[k][m] || 0) + v;
+  return tot;
+}
+
+// Dos gráficas con la misma escala en pesos: CAPEX por mes y curva acumulada
+function capexGraficasHtml(tot) {
+  const llaves = [...new Set([...Object.keys(tot.plan), ...Object.keys(tot.real), ...Object.keys(tot.proy)])].sort();
+  if (!llaves.length) return '<p class="vacio">Sin CAPEX para graficar.</p>';
+  const meses = [];
+  for (let [y, m] = llaves[0].split('-').map(Number); ; m++) {
+    if (m > 12) { m = 1; y++; }
+    const k = `${y}-${String(m).padStart(2, '0')}`;
+    meses.push(k);
+    if (k >= llaves[llaves.length - 1]) break;
+  }
+  const hoyK = mesClave(diaDe(hoyISO()));
+  const filas = meses.map((k) => ({ k, plan: tot.plan[k] || 0, real: tot.real[k] || 0, proy: tot.proy[k] || 0 }));
+  let ap = 0, ar = 0;
+  filas.forEach((f) => { ap += f.plan; ar += f.real + f.proy; f.acP = ap; f.acR = ar; });
+
+  const W = 900, H = 240, L = 64, R = 12, T = 12, B = 34;
+  const iw = W - L - R, ih = H - T - B, bw = iw / meses.length;
+  const paso = meses.length > 24 ? 3 : meses.length > 12 ? 2 : 1;
+  const eje = (max, y) => {
+    const tope = max > 0 ? max * 1.08 : 1;
+    const ticks = [0, 0.25, 0.5, 0.75, 1].map((t) => t * tope);
+    return { y: (v) => T + ih - (v / tope) * ih, ticks };
+  };
+  const ejeX = (cx) => meses.map((k, i) => (i % paso ? '' : `<text x="${cx(i)}" y="${H - 12}" text-anchor="middle" class="cx-t">${mesNombre(k)}</text>`)).join('');
+  const grid = (e) => e.ticks.map((t) => `<line x1="${L}" x2="${W - R}" y1="${e.y(t)}" y2="${e.y(t)}" class="cx-grid"/><text x="${L - 6}" y="${e.y(t) + 4}" text-anchor="end" class="cx-t">${fmtM(t)}</text>`).join('');
+  const hoyI = meses.indexOf(hoyK);
+  const lineaHoy = (cx) => (hoyI >= 0 ? `<line x1="${cx(hoyI)}" x2="${cx(hoyI)}" y1="${T}" y2="${T + ih}" class="cx-hoy"/><text x="${cx(hoyI) + 4}" y="${T + 10}" class="cx-t">Hoy</text>` : '');
+
+  // Barras por mes (dos series, una junto a otra; la proyección es la parte clara de la barra naranja)
+  const e1 = eje(Math.max(...filas.map((f) => Math.max(f.plan, f.real + f.proy))));
+  const g = 2, w = Math.max(2, Math.min(18, (bw - 6) / 2 - g / 2));
+  const cxB = (i) => L + bw * i + bw / 2;
+  const barra = (x, v0, v1, cls) => (v1 - v0 > 0 ? `<rect x="${x}" y="${e1.y(v1)}" width="${w}" height="${Math.max(0.5, e1.y(v0) - e1.y(v1))}" rx="2" class="${cls}"/>` : '');
+  const barras = filas.map((f, i) => {
+    const x = cxB(i);
+    return `<g class="cx-hit" data-tt="${esc(`<b>${mesNombre(f.k)}</b><br>Plan (Gantt): ${fmtMXN(f.plan)}<br>Real: ${fmtMXN(f.real)}<br>Proyección: ${fmtMXN(f.proy)}`)}">
+      <rect x="${L + bw * i}" y="${T}" width="${bw}" height="${ih}" class="cx-zona"/>
+      ${barra(x - w - g / 2, 0, f.plan, 'cx-plan')}
+      ${barra(x + g / 2, 0, f.real, 'cx-real')}${barra(x + g / 2, f.real, f.real + f.proy, 'cx-proy')}</g>`;
+  }).join('');
+
+  // Curva acumulada
+  const e2 = eje(Math.max(ap, ar));
+  const cxL = (i) => L + bw * i + bw / 2;
+  const linea = (campo, cls, desde = 0, hasta = filas.length - 1) => {
+    const pts = filas.slice(desde, hasta + 1).map((f, j) => `${cxL(desde + j).toFixed(1)},${e2.y(f[campo]).toFixed(1)}`).join(' ');
+    return pts.includes(' ') ? `<polyline points="${pts}" class="${cls}"/>` : '';
+  };
+  const corte = hoyI >= 0 ? hoyI : filas.findIndex((f) => f.k > hoyK) - 1;
+  const lineaReal = corte < 0 ? linea('acR', 'cx-l-proy') : corte >= filas.length - 1 ? linea('acR', 'cx-l-real') : linea('acR', 'cx-l-real', 0, corte) + linea('acR', 'cx-l-proy', corte);
+  const puntos = filas.map((f, i) => `<g class="cx-hit" data-tt="${esc(`<b>${mesNombre(f.k)}</b><br>Acumulado plan: ${fmtMXN(f.acP)}<br>Acumulado real y proyección: ${fmtMXN(f.acR)}`)}">
+      <rect x="${L + bw * i}" y="${T}" width="${bw}" height="${ih}" class="cx-zona"/>
+      <circle cx="${cxL(i)}" cy="${e2.y(f.acP)}" r="3" class="cx-pt-plan"/><circle cx="${cxL(i)}" cy="${e2.y(f.acR)}" r="3" class="cx-pt-real"/></g>`).join('');
+
+  const tabla = `<details class="cx-tabla"><summary>Ver tabla por mes</summary><div class="tabla-wrap"><table class="tabla compacta">
+    <thead><tr><th>Mes</th><th>Plan (Gantt)</th><th>Real</th><th>Proyección</th><th>Acum. plan</th><th>Acum. real + proy.</th></tr></thead><tbody>
+    ${filas.map((f) => `<tr><td>${mesNombre(f.k)}</td><td>${fmtMXN(f.plan)}</td><td>${fmtMXN(f.real)}</td><td>${fmtMXN(f.proy)}</td><td>${fmtMXN(f.acP)}</td><td>${fmtMXN(f.acR)}</td></tr>`).join('')}
+    </tbody></table></div></details>`;
+
+  const leyenda = `<div class="g-leyenda"><span><i class="sw cx-sw-plan"></i>Plan según Gantt (fechas de Construcción)</span>
+    <span><i class="sw cx-sw-real"></i>Real según avance de obra</span><span><i class="sw cx-sw-proy"></i>Proyección de lo que falta</span></div>`;
+  return `<div class="cx-graf">
+    <h3>CAPEX por mes</h3>${leyenda}
+    <svg viewBox="0 0 ${W} ${H}" class="cx-svg" role="img" aria-label="CAPEX por mes: plan contra real y proyección">${grid(e1)}${lineaHoy(cxB)}${barras}<line x1="${L}" x2="${W - R}" y1="${T + ih}" y2="${T + ih}" class="cx-base"/>${ejeX(cxB)}</svg>
+    <h3>CAPEX acumulado (curva S)</h3>
+    <svg viewBox="0 0 ${W} ${H}" class="cx-svg" role="img" aria-label="CAPEX acumulado: plan contra real y proyección">${grid(e2)}${lineaHoy(cxL)}${linea('acP', 'cx-l-plan')}${lineaReal}${puntos}<line x1="${L}" x2="${W - R}" y1="${T + ih}" y2="${T + ih}" class="cx-base"/>${ejeX(cxL)}</svg>
+    ${tabla}</div>`;
+}
+
+// Tooltip compartido de las gráficas
+function activarTooltips(root) {
+  let tip = $('#cxTip');
+  if (!tip) { tip = document.createElement('div'); tip.id = 'cxTip'; tip.className = 'cx-tip'; document.body.appendChild(tip); }
+  $$('.cx-hit', root).forEach((g) => {
+    g.onmousemove = (e) => {
+      tip.innerHTML = g.dataset.tt; tip.style.display = 'block';
+      const x = Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
+      tip.style.left = `${x}px`; tip.style.top = `${e.clientY + 14}px`;
+      g.classList.add('sobre');
+    };
+    g.onmouseleave = () => { tip.style.display = 'none'; g.classList.remove('sobre'); };
+  });
+}
+
+async function vistaCapex() {
+  const v = vista('Cargando CAPEX…');
+  const etapaC = etapaPorNum(N_CONST);
+  const [rp, rav, rh] = await Promise.all([
+    sb.from('proyectos').select('*'),
+    sb.from('avance_obra').select('proyecto_id,fecha,porcentaje,id'),
+    sb.from('historial').select('proyecto_id,created_at').eq('etapa_nueva', etapaC),
+  ]);
+  if (rp.error) { v.innerHTML = `<p class="error">${esc(errorTxt(rp.error))}</p>`; return; }
+  if (rp.data.length && !capexListo(rp.data[0])) { v.innerHTML = '<p class="muted">Falta ejecutar <b>supabase/008_capex.sql</b> en Supabase para activar el CAPEX.</p>'; return; }
+  const avPor = {}; (rav.data || []).forEach((a) => (avPor[a.proyecto_id] = avPor[a.proyecto_id] || []).push(a));
+  const iniPor = {}; (rh.data || []).forEach((h) => { const d = diaDe(h.created_at); if (!iniPor[h.proyecto_id] || d < iniPor[h.proyecto_id]) iniPor[h.proyecto_id] = d; });
+  const todos = rp.data.filter((p) => num(p.etapa) !== N_CANCEL).map((p) => ({ p, cx: capexDe(p, avPor[p.id], iniPor[p.id]), st: estadoPlan(p) }));
+  const f = { seg: '', anio: '' };
+
+  v.innerHTML = `<div class="titulo"><h1>CAPEX</h1>
+      <div class="gg-filtros"><select id="cxSeg"><option value="">Todos los segmentos</option>${SEGMENTOS.map((x) => `<option>${x}</option>`).join('')}</select></div></div>
+    <p class="muted chico">El CAPEX de cada Elemento PEP se reparte en las fechas de <b>Construcción</b> del Gantt (plan) y, cuando hay reportes de avance de obra, en lo realmente ejercido más la proyección de lo que falta.</p>
+    <div class="kpis" id="cxKpis"></div>
+    <section class="card" id="cxGraf"></section>
+    <section class="card"><h2>Por segmento</h2><div id="cxSegs"></div></section>
+    <section class="card"><h2>Proyectos</h2><div id="cxLista"></div></section>`;
+
+  const pintar = () => {
+    const base = todos.filter((x) => !f.seg || x.p.segmento === f.seg);
+    const con = base.filter((x) => x.cx);
+    const sinCapex = base.filter((x) => num(x.p.etapa) >= N_PEP && num(x.p.etapa) <= N_FINAL && !x.p.capex);
+    const total = con.reduce((t, x) => t + x.cx.capex, 0);
+    const ejer = con.reduce((t, x) => t + x.cx.ejercido, 0);
+    const anioK = String(new Date().getFullYear());
+    const tot = sumarCapex(con.map((x) => x.cx));
+    const planAnio = Object.entries(tot.plan).filter(([k]) => k.startsWith(anioK)).reduce((t, [, x]) => t + x, 0);
+    $('#cxKpis').innerHTML = `
+      <div class="kpi"><b>${fmtM(total)}</b><span>CAPEX registrado (${con.length} proyectos)</span></div>
+      <div class="kpi"><b>${fmtM(ejer)}</b><span>Ejercido según avance (${total ? Math.round(ejer / total * 100) : 0}%)</span></div>
+      <div class="kpi"><b>${fmtM(total - ejer)}</b><span>Por ejercer</span></div>
+      <div class="kpi"><b>${fmtM(planAnio)}</b><span>Plan ${anioK} según Gantt</span></div>
+      <div class="kpi ${sinCapex.length ? 'alerta' : ''}"><b>${sinCapex.length}</b><span>Con PEP pendiente o sin CAPEX</span></div>`;
+    $('#cxGraf').innerHTML = capexGraficasHtml(tot);
+    $('#cxSegs').innerHTML = `<div class="tabla-wrap"><table class="tabla compacta"><thead><tr><th>Segmento</th><th>Proyectos</th><th>CAPEX</th><th>Ejercido</th><th>Por ejercer</th></tr></thead><tbody>
+      ${SEGMENTOS.map((sg) => { const l = con.filter((x) => x.p.segmento === sg); const c = l.reduce((t, x) => t + x.cx.capex, 0), e = l.reduce((t, x) => t + x.cx.ejercido, 0);
+        return l.length ? `<tr><td>${sg}</td><td>${l.length}</td><td>${fmtMXN(c)}</td><td>${fmtMXN(e)}</td><td>${fmtMXN(c - e)}</td></tr>` : ''; }).join('')}
+      </tbody></table></div>`;
+    const orden = [...con].sort((a, b) => a.cx.iniPlan - b.cx.iniPlan);
+    $('#cxLista').innerHTML = orden.length ? `<div class="tabla-wrap"><table class="tabla"><thead><tr><th>Folio</th><th>Proyecto</th><th>Etapa</th><th>Elemento PEP</th><th>CAPEX</th><th>Ejercido</th><th>Construcción (plan)</th><th>Término proyectado</th><th>Plan</th></tr></thead><tbody>
+      ${orden.map(({ p, cx, st }) => `<tr data-id="${p.id}">
+        <td><b>${esc(p.folio)}</b></td><td>${esc(p.nombre)}<br><small class="muted">${esc(p.segmento)} · ${esc(p.municipio)}</small></td>
+        <td>${badgeEtapa(p.etapa)}</td><td>${esc(p.elemento_pep || '—')}</td><td>${fmtMXN(cx.capex)}</td>
+        <td>${fmtMXN(cx.ejercido)} <small class="muted">(${Math.round(cx.pct)}%)</small></td>
+        <td>${fecha(isoDe(cx.iniPlan))} – ${fecha(isoDe(cx.finPlan))}</td>
+        <td class="${cx.finProy && cx.finProy > cx.finPlan ? 'vencido' : ''}">${cx.finProy ? fecha(isoDe(cx.finProy)) : '—'}</td>
+        <td>${pillPlan(st)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="vacio">Ningún proyecto tiene CAPEX y fecha requerida de gas todavía.</p>';
+    if (sinCapex.length) $('#cxLista').innerHTML += `<p class="muted chico">Sin CAPEX: ${sinCapex.map(({ p }) => `<a href="#/p/${p.id}/capex">${esc(p.folio)}</a>`).join(', ')}</p>`;
+    $$('#cxLista tr[data-id]').forEach((tr) => (tr.onclick = () => (location.hash = `#/p/${tr.dataset.id}/capex`)));
+    activarTooltips(v);
+  };
+  $('#cxSeg').onchange = (e) => { f.seg = e.target.value; pintar(); };
+  pintar();
+}
+
+// ---------------------------------------------------------------------
 // Nueva solicitud
 // ---------------------------------------------------------------------
 function vistaNueva() {
@@ -702,7 +926,7 @@ function accionesDe(p) {
   for (const g of REGRESOS.filter((x) => x.de === n && puede(x.roles)))
     out.push({ id: g.id || 'regresar', label: g.label, destino: etapaPorNum(g.a), sec: true, peligro: !!g.peligro });
   if (n >= N_PEP && n < N_FINAL && (adm || (r === 'Proyectista' && p.proyectista_id === me)))
-    out.push({ id: 'pep', label: p.elemento_pep ? 'Corregir Elemento PEP' : 'Registrar Elemento PEP', sec: !!p.elemento_pep });
+    out.push({ id: 'pep', label: p.elemento_pep ? (capexListo(p) && p.capex == null ? 'Registrar CAPEX del PEP' : 'Corregir Elemento PEP / CAPEX') : 'Registrar Elemento PEP y CAPEX', sec: !!p.elemento_pep && !(capexListo(p) && p.capex == null) });
   if (adm) out.push({ id: 'mover', label: 'Mover a otra etapa', sec: true });
   if (puedeEditar()) out.push({ id: 'comentar', label: 'Agregar comentario', sec: true });
   return out;
@@ -710,7 +934,7 @@ function accionesDe(p) {
 
 const PESTANAS = [
   ['resumen', 'Resumen'], ['expediente', 'Expediente'], ['actividades', 'Actividades'],
-  ['construccion', 'Construcción'], ['historial', 'Historial'],
+  ['construccion', 'Construcción'], ['capex', 'CAPEX'], ['historial', 'Historial'],
 ];
 async function vistaDetalle(id, pestana) {
   const v = vista('Cargando proyecto…');
@@ -851,7 +1075,8 @@ async function vistaDetalle(id, pestana) {
               <dt>Proyectista</dt><dd>${p.proyectista_id ? esc(nombreDe(p.proyectista_id)) : '—'}</dd>
               ${S.flujoListo ? `<dt>Factibilidad</dt><dd>${esc(p.factibilidad || '—')}</dd>
               ${p.aprobado_por ? `<dt>Anteproyecto</dt><dd>Aprobado por: ${firmaAprobacion(p)}</dd>` : ''}
-              <dt>Elemento PEP</dt><dd>${p.elemento_pep ? `${esc(p.elemento_pep)}${p.fecha_pep ? ` <small class="muted">(${fecha(p.fecha_pep)})</small>` : ''}` : '<span class="muted">Pendiente</span>'}</dd>` : ''}
+              <dt>Elemento PEP</dt><dd>${p.elemento_pep ? `${esc(p.elemento_pep)}${p.fecha_pep ? ` <small class="muted">(${fecha(p.fecha_pep)})</small>` : ''}` : '<span class="muted">Pendiente</span>'}</dd>
+              ${capexListo(p) ? `<dt>CAPEX</dt><dd>${p.capex != null ? fmtMXN(p.capex) : '<span class="muted">Pendiente</span>'}</dd>` : ''}` : ''}
               <dt>Creado</dt><dd>${fechaHora(p.created_at)}</dd>
             </dl>
           </div>
@@ -926,7 +1151,7 @@ async function vistaDetalle(id, pestana) {
             <dt>Municipio</dt><dd>${esc(p.municipio)}</dd>
             <dt>Segmento / material</dt><dd>${esc(p.segmento)} · ${esc(p.material)}</dd>
             <dt>Proyectista</dt><dd>${p.proyectista_id ? esc(nombreDe(p.proyectista_id)) : '—'}</dd>
-            <dt>Elemento PEP</dt><dd>${p.elemento_pep ? esc(p.elemento_pep) : '<span class="vencido">Pendiente</span>'}</dd>
+            <dt>Elemento PEP</dt><dd>${p.elemento_pep ? esc(p.elemento_pep) : '<span class="vencido">Pendiente</span>'}${capexListo(p) && p.capex != null ? ` · CAPEX ${fmtMXN(p.capex)}` : ''}</dd>
             <dt>Gas requerido</dt><dd>${fecha(p.fecha_requerida_gas) || '—'}</dd>
           </dl>
           <h3>Licencias</h3>
@@ -936,6 +1161,10 @@ async function vistaDetalle(id, pestana) {
         </section>
       </div>
     </div>
+    </div>
+
+    <div class="tab-panel" data-panel="capex">
+      <section class="card" id="cardCapex"></section>
     </div>
 
     <div class="tab-panel" data-panel="historial">
@@ -1021,7 +1250,8 @@ async function vistaDetalle(id, pestana) {
       ${proyectistas.map((x) => `<option value="${x.id}" ${x.id === p.proyectista_id ? 'selected' : ''}>${esc(x.nombre || x.email)}</option>`).join('')}</select></label>
       ${proyectistas.length ? '' : '<p class="error">No hay usuarios con rol Proyectista.</p>'}`;
     if (a.id === 'pep') extra = `<label>Elemento PEP *<input name="elemento_pep" required maxlength="60" value="${esc(p.elemento_pep || '')}" placeholder="Ej. I-26-0123-001"></label>
-      <label>Fecha de creación del PEP<input type="date" name="fecha_pep" value="${esc(p.fecha_pep || hoyISO())}"></label>`;
+      <label>Fecha de creación del PEP<input type="date" name="fecha_pep" value="${esc(p.fecha_pep || hoyISO())}"></label>
+      ${capexListo(p) ? `<label>CAPEX del PEP (MXN) *<input type="number" name="capex" required min="0" step="0.01" value="${esc(p.capex ?? '')}" placeholder="Ej. 1250000"></label>` : ''}`;
     if (a.id === 'mover') extra = `<label>Nueva etapa *<select name="etapa" required>${ETAPAS.filter((e) => e !== p.etapa).map((e) => `<option>${esc(e)}</option>`).join('')}</select></label>`;
 
     const requiereComentario = ['devolver', 'comentar', 'cancelar', 'regresar'].includes(a.id);
@@ -1055,7 +1285,10 @@ async function vistaDetalle(id, pestana) {
           const cambios = { comentario_cambio: fd.comentario?.trim() || null };
           if (a.id === 'asignar') { cambios.proyectista_id = fd.proyectista_id; cambios.etapa = a.destino; }
           else if (a.id === 'mover') cambios.etapa = fd.etapa;
-          else if (a.id === 'pep') { cambios.elemento_pep = fd.elemento_pep.trim(); cambios.fecha_pep = fd.fecha_pep || null; }
+          else if (a.id === 'pep') {
+            cambios.elemento_pep = fd.elemento_pep.trim(); cambios.fecha_pep = fd.fecha_pep || null;
+            if (capexListo(p)) cambios.capex = fd.capex === '' ? null : Number(fd.capex);
+          }
           else cambios.etapa = a.destino;
           r = await sb.from('proyectos').update(cambios).eq('id', p.id).select('id');
           if (!r.error && !r.data?.length) throw new Error('No tienes permiso para modificar este proyecto');
@@ -1288,6 +1521,30 @@ async function vistaDetalle(id, pestana) {
     };
   };
   pintarAvance();
+
+  // --- CAPEX del proyecto
+  const cardCapex = $('#cardCapex');
+  if (cardCapex) {
+    if (!capexListo(p)) cardCapex.innerHTML = '<h2>CAPEX</h2><p class="muted">Falta ejecutar <b>supabase/008_capex.sql</b> en Supabase.</p>';
+    else if (p.capex == null) cardCapex.innerHTML = `<h2>CAPEX</h2><p class="muted">El CAPEX se registra junto con el <b>Elemento PEP</b> (lo captura el proyectista desde la pestaña Resumen → Acciones).</p>`;
+    else if (!plan) cardCapex.innerHTML = `<h2>CAPEX</h2><p><b>${fmtMXN(p.capex)}</b></p><p class="muted">Captura la fecha requerida de gas para repartir el CAPEX según el Gantt.</p>`;
+    else {
+      const cx = capexDe(p, avances, realesDe(p, hist)[etapaPorNum(N_CONST)]?.inicio || null);
+      if (!cx) cardCapex.innerHTML = `<h2>CAPEX</h2><p><b>${fmtMXN(p.capex)}</b></p><p class="muted">Proyecto cancelado: no se proyecta ejercicio.</p>`;
+      else {
+        cardCapex.innerHTML = `<div class="card-h"><h2>CAPEX</h2><span class="pill">${esc(p.elemento_pep || '')}</span></div>
+          <div class="kpis">
+            <div class="kpi"><b>${fmtM(cx.capex)}</b><span>CAPEX del PEP</span></div>
+            <div class="kpi"><b>${fmtM(cx.ejercido)}</b><span>Ejercido según avance (${Math.round(cx.pct)}%)</span></div>
+            <div class="kpi"><b>${fmtM(cx.capex - cx.ejercido)}</b><span>Por ejercer</span></div>
+            <div class="kpi"><b>${fecha(isoDe(cx.iniPlan))}</b><span>Inicio de construcción (Gantt)</span></div>
+            <div class="kpi ${cx.finProy && cx.finProy > cx.finPlan ? 'alerta' : ''}"><b>${cx.finProy ? fecha(isoDe(cx.finProy)) : '—'}</b><span>Término proyectado (plan: ${fecha(isoDe(cx.finPlan))})</span></div>
+          </div>
+          ${capexGraficasHtml(cx)}`;
+        activarTooltips(cardCapex);
+      }
+    }
+  }
 
   // --- Seguimiento
   const frmSeg = $('#frmSeg');
