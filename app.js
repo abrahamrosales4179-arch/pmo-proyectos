@@ -283,6 +283,7 @@ async function cargarYMostrar() {
 }
 
 function pantallaLogin() {
+  $('#chatBtn')?.remove(); $('#chatPanel')?.remove(); S.chat = null;
   app.innerHTML = `<div class="centro"><form class="card login" id="frmLogin">
     <h1>${esc(NOMBRE_APP)}</h1>
     <p class="muted">Control y seguimiento de proyectos</p>
@@ -330,6 +331,7 @@ function pantallaPrincipal() {
   </header>
   <main id="vista"></main>`;
   $('#btnSalir').onclick = () => sb.auth.signOut();
+  montarChat();
 }
 
 function router() {
@@ -1800,6 +1802,251 @@ function vistaCuenta() {
     ev.target.reset();
     toast('Contraseña actualizada');
   };
+}
+
+
+// ---------------------------------------------------------------------
+// Asistente: preguntas en lenguaje natural sobre los datos de la app
+// (sin IA externa: interpreta la pregunta con reglas y calcula con los datos)
+// ---------------------------------------------------------------------
+const MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+const norm = (t) => t.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[¿?¡!.,;:]/g, ' ').replace(/\s+/g, ' ').trim();
+const NUMS = { un: 1, una: 1, uno: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5, seis: 6, siete: 7, ocho: 8, nueve: 9, diez: 10, quince: 15, veinte: 20, treinta: 30, sesenta: 60, noventa: 90 };
+
+// Periodo mencionado en la pregunta → { ini, fin, etiqueta } (fechas a mediodía, fin incluido)
+function periodoDe(q, porDefectoDias = null) {
+  const hoy = diaDe(hoyISO());
+  const finMes = (y, m) => new Date(y, m + 1, 0, 12);
+  let m;
+  if ((m = q.match(/(?:proxim[oa]s|siguientes|en los|en las|dentro de|en)\s+(\d+|[a-z]+)\s+(dia|dias|semana|semanas|mes|meses)/)) && (/^\d+$/.test(m[1]) || NUMS[m[1]])) {
+    const n = /^\d+$/.test(m[1]) ? Number(m[1]) : NUMS[m[1]];
+    const dias = m[2].startsWith('dia') ? n : m[2].startsWith('semana') ? n * 7 : n * 30;
+    return { ini: hoy, fin: sumaDias(hoy, dias), etiqueta: `los próximos ${n} ${m[2].startsWith('dia') ? 'días' : m[2]}` };
+  }
+  if (/\bhoy\b/.test(q)) return { ini: hoy, fin: hoy, etiqueta: 'hoy' };
+  if (/esta semana/.test(q)) return { ini: hoy, fin: sumaDias(hoy, 7 - (hoy.getDay() || 7)), etiqueta: 'esta semana' };
+  if (/(proximo mes|mes que viene|siguiente mes)/.test(q)) { const y = hoy.getFullYear(), mm = hoy.getMonth() + 1; return { ini: new Date(y, mm, 1, 12), fin: finMes(y, mm), etiqueta: 'el próximo mes' }; }
+  if (/este mes/.test(q)) return { ini: new Date(hoy.getFullYear(), hoy.getMonth(), 1, 12), fin: finMes(hoy.getFullYear(), hoy.getMonth()), etiqueta: 'este mes' };
+  const anio = q.match(/\b(20\d\d)\b/);
+  const meses = MESES.map((n, i) => (new RegExp(`\\b${n === 'septiembre' ? 'sept?iembre' : n}\\b`).test(q) ? i : -1)).filter((i) => i >= 0);
+  if (meses.length) {
+    // Sin año: el próximo mes con ese nombre (o el actual)
+    const y0 = anio ? Number(anio[1]) : null;
+    const yDe = (mm) => y0 ?? (mm < hoy.getMonth() ? hoy.getFullYear() + 1 : hoy.getFullYear());
+    const a = Math.min(...meses), b = Math.max(...meses);
+    const ya = yDe(a); const yb = b < a ? ya + 1 : y0 ?? (b < hoy.getMonth() && !y0 ? hoy.getFullYear() + 1 : ya);
+    const ini = new Date(ya, a, 1, 12), fin = finMes(meses.length > 1 ? yb : ya, meses.length > 1 ? b : a);
+    const et = meses.length > 1 ? `${MESES[a]} a ${MESES[b]} de ${fin.getFullYear()}` : `${MESES[a]} de ${ya}`;
+    return { ini, fin, etiqueta: et };
+  }
+  if (anio || /este ano|en el ano/.test(q)) { const y = anio ? Number(anio[1]) : hoy.getFullYear(); return { ini: new Date(y, 0, 1, 12), fin: new Date(y, 11, 31, 12), etiqueta: `${y}` }; }
+  if (/trimestre/.test(q)) { const t = Math.floor(hoy.getMonth() / 3) * 3 + (/proximo|siguiente/.test(q) ? 3 : 0); const y = hoy.getFullYear() + Math.floor(t / 12); const mm = t % 12; return { ini: new Date(y, mm, 1, 12), fin: finMes(y, mm + 2), etiqueta: `el trimestre ${MESES[mm]}–${MESES[mm + 2]} ${y}` }; }
+  if (porDefectoDias != null) return { ini: hoy, fin: sumaDias(hoy, porDefectoDias), etiqueta: `los próximos ${porDefectoDias} días`, defecto: true };
+  return null;
+}
+const segmentoDe = (q) => SEGMENTOS.find((s) => q.includes(norm(s)) || q.includes(norm(s).slice(0, -1) + 'es')) || null;
+
+async function datosChat() {
+  if (S.chat?.datos && Date.now() - S.chat.datos.ts < 3 * 60 * 1000) return S.chat.datos;
+  const etapaC = etapaPorNum(N_CONST);
+  const [rp, rl, rav, rh] = await Promise.all([
+    sb.from('proyectos').select('*'),
+    sb.from('licencias').select('*'),
+    sb.from('avance_obra').select('proyecto_id,fecha,porcentaje,id'),
+    sb.from('historial').select('proyecto_id,created_at').eq('etapa_nueva', etapaC),
+  ]);
+  const e = rp.error || rl.error;
+  if (e) throw e;
+  const avPor = {}; (rav.data || []).forEach((a) => (avPor[a.proyecto_id] = avPor[a.proyecto_id] || []).push(a));
+  const iniPor = {}; (rh.data || []).forEach((h) => { const d = diaDe(h.created_at); if (!iniPor[h.proyecto_id] || d < iniPor[h.proyecto_id]) iniPor[h.proyecto_id] = d; });
+  const proyectos = rp.data;
+  const porId = Object.fromEntries(proyectos.map((p) => [p.id, p]));
+  S.chat.datos = { ts: Date.now(), proyectos, porId, lics: rl.data || [], avPor, iniPor };
+  return S.chat.datos;
+}
+// Proyecto mencionado por nombre: gana el que más palabras distintivas comparte con la pregunta
+const GENERICAS = new Set(['planta', 'fracc', 'plaza', 'residencial', 'coto', 'centro', 'comercial', 'industrial', 'proyecto', 'torre', 'parque', 'etapa', 'nave', 'valle', 'hacienda', 'villas', 'lomas', 'jardines']);
+function buscarProyecto(q, proyectos) {
+  const pal = (t) => norm(t).split(' ').filter((w) => w.length > 3);
+  const qs = new Set(pal(q));
+  const pts = proyectos.map((p) => {
+    const ws = pal(p.nombre);
+    return { p, n: ws.filter((w) => qs.has(w) && !GENERICAS.has(w)).length, g: ws.filter((w) => qs.has(w)).length };
+  }).filter((x) => x.g > 0);
+  if (!pts.length) return [];
+  const max = Math.max(...pts.map((x) => x.n * 10 + x.g));
+  return pts.filter((x) => x.n * 10 + x.g === max).map((x) => x.p);
+}
+const linkP = (p, tab = '') => `<a href="#/p/${p.id}${tab ? '/' + tab : ''}">${esc(p.folio)}</a>`;
+const lista = (items, max = 12) => `<ul>${items.slice(0, max).map((x) => `<li>${x}</li>`).join('')}</ul>${items.length > max ? `<p class="muted">…y ${items.length - max} más.</p>` : ''}`;
+
+async function responder(pregunta) {
+  const q = norm(pregunta);
+  const D = await datosChat();
+  const seg = segmentoDe(q);
+  const hoy = diaDe(hoyISO());
+  const enSeg = (p) => !seg || p.segmento === seg;
+  const txtSeg = seg ? ` (${seg})` : '';
+
+  // Proyecto específico por folio
+  const folio = pregunta.toUpperCase().match(/\b[A-Z]{1,2}[RCI][PA]\d{5}\b/);
+  let porFolio = folio && D.proyectos.find((p) => p.folio === folio[0]);
+  if (folio && !porFolio) return `No encontré el folio <b>${esc(folio[0])}</b>.`;
+  const porNombre = folio ? [] : buscarProyecto(q, D.proyectos);
+  if (!porFolio && porNombre.length === 1) porFolio = porNombre[0];
+
+  if (/^(hola|buen[oa]s|buen dia|que tal|hey)\b/.test(q) && q.split(' ').length <= 4)
+    return `¡Hola! ¿Qué quieres consultar? Por ejemplo: «licencias que vencen este mes», «CAPEX de mayo», «proyectos atrasados» o el folio de un proyecto.`;
+  if (/^(gracias|ok|vale|perfecto)\b/.test(q)) return 'Con gusto. ¿Algo más?';
+
+  // 1. Licencias por vencer / vencidas
+  if (/licenc|permiso/.test(q) && /venc|caduc|expir|venc/.test(q)) {
+    const vencidas = /vencid|caducad|ya vencieron|expirad/.test(q) && !/por vencer|proxim/.test(q);
+    const per = vencidas ? null : periodoDe(q, 30);
+    if (per && per.ini < hoy) per.ini = hoy; // «por vencer» cuenta desde hoy
+    const filas = D.lics.filter((l) => l.fecha_vencimiento && D.porId[l.proyecto_id] && enSeg(D.porId[l.proyecto_id]) && num(D.porId[l.proyecto_id].etapa) < N_FINAL)
+      .map((l) => ({ l, p: D.porId[l.proyecto_id], v: diaDe(l.fecha_vencimiento) }))
+      .filter((x) => (vencidas ? x.v < hoy : x.v >= per.ini && x.v <= per.fin))
+      .sort((a, b) => a.v - b.v);
+    const titulo = vencidas ? `Licencias ya vencidas en proyectos activos${txtSeg}` : `Licencias que vencen en ${per.etiqueta}${txtSeg}`;
+    if (!filas.length) return `<b>${titulo}:</b> ninguna.${per?.defecto ? ' <span class="muted">Puedes preguntar por otro periodo, por ejemplo «en los próximos 90 días».</span>' : ''}`;
+    return `<b>${titulo}: ${filas.length}</b>` + lista(filas.map(({ l, p, v }) => {
+      const dias = Math.round((v - hoy) / DIA);
+      return `${linkP(p, 'expediente')} · ${esc(l.tipo)} <span class="muted">(${esc(l.dependencia || '—')})</span><br><b>${fecha(l.fecha_vencimiento)}</b> · ${dias < 0 ? `<span class="vencido">venció hace ${-dias} días</span>` : dias === 0 ? 'vence hoy' : `faltan ${dias} días`} · ${esc(l.estatus)}`;
+    }));
+  }
+
+  // 2. CAPEX por periodo
+  if (/capex|inversion|ejerc|gast|presupuest/.test(q)) {
+    if (porFolio && !periodoDe(q)) {
+      const cx = capexDe(porFolio, D.avPor[porFolio.id], D.iniPor[porFolio.id]);
+      if (porFolio.capex == null) return `${linkP(porFolio)} no tiene CAPEX registrado todavía.`;
+      return `<b>${linkP(porFolio, 'capex')} · ${esc(porFolio.nombre)}</b><br>CAPEX: <b>${fmtMXN(porFolio.capex)}</b>` +
+        (cx ? `<br>Ejercido según avance: ${fmtMXN(cx.ejercido)} (${Math.round(cx.pct)}%)<br>Construcción según Gantt: ${fecha(isoDe(cx.iniPlan))} – ${fecha(isoDe(cx.finPlan))}` : '');
+    }
+    const per = periodoDe(q) || { ini: new Date(hoy.getFullYear(), hoy.getMonth(), 1, 12), fin: new Date(hoy.getFullYear(), hoy.getMonth() + 1, 0, 12), etiqueta: 'este mes', defecto: true };
+    const kIni = mesClave(per.ini), kFin = mesClave(per.fin);
+    const enRango = (k) => k >= kIni && k <= kFin;
+    const lista_ = D.proyectos.filter((p) => enSeg(p) && (!porFolio || p.id === porFolio.id)).map((p) => ({ p, cx: capexDe(p, D.avPor[p.id], D.iniPor[p.id]) })).filter((x) => x.cx);
+    const suma = (cx, campo) => Object.entries(cx[campo]).filter(([k]) => enRango(k)).reduce((t, [, v]) => t + v, 0);
+    const filas = lista_.map(({ p, cx }) => ({ p, plan: suma(cx, 'plan'), real: suma(cx, 'real'), proy: suma(cx, 'proy') })).filter((x) => x.plan + x.real + x.proy > 0.5);
+    const tP = filas.reduce((t, x) => t + x.plan, 0), tR = filas.reduce((t, x) => t + x.real, 0), tY = filas.reduce((t, x) => t + x.proy, 0);
+    if (!filas.length) return `<b>CAPEX ${porFolio ? `de ${linkP(porFolio, 'capex')} ` : ''}en ${per.etiqueta}${txtSeg}:</b> no hay CAPEX programado en ese periodo.`;
+    const futuro = per.ini > hoy, pasado = per.fin < hoy;
+    const principal = futuro
+      ? `Se espera ejercer <b>${fmtMXN(tR + tY)}</b> según el avance de obra y la proyección (el plan del Gantt marca ${fmtMXN(tP)}).`
+      : pasado ? `Se ejercieron <b>${fmtMXN(tR)}</b> según los reportes de avance (el plan del Gantt marcaba ${fmtMXN(tP)}).`
+      : `Plan del Gantt: <b>${fmtMXN(tP)}</b> · ejercido a la fecha: <b>${fmtMXN(tR)}</b> · proyectado por ejercer: <b>${fmtMXN(tY)}</b>.`;
+    const top = [...filas].sort((a, b) => (b.real + b.proy) - (a.real + a.proy));
+    if (porFolio) return `<b>CAPEX de ${linkP(porFolio, 'capex')} · ${esc(porFolio.nombre)} en ${per.etiqueta}</b><br>${principal}`;
+    return `<b>CAPEX en ${per.etiqueta}${txtSeg}</b><br>${principal}<br><span class="muted">${filas.length} proyectos con CAPEX en ese periodo. Los que más aportan:</span>` +
+      lista(top.map((x) => `${linkP(x.p, 'capex')} · ${esc(x.p.nombre)}: ${fmtMXN(x.real + x.proy)} <span class="muted">(plan ${fmtMXN(x.plan)})</span>`), 6) +
+      `<p class="muted">Detalle mes a mes en <a href="#/capex">CAPEX</a>.</p>`;
+  }
+
+  // 3. Estado de un proyecto
+  if (porFolio || /(como va|estado|avance|status)/.test(q)) {
+    const p = porFolio;
+    if (!p && porNombre.length > 1) return `Encontré varios proyectos, ¿cuál?` + lista(porNombre.map((x) => `${linkP(x)} · ${esc(x.nombre)}`));
+    if (p) {
+      const st = estadoPlan(p);
+      const avs = (D.avPor[p.id] || []).sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
+      const lics = D.lics.filter((l) => l.proyecto_id === p.id);
+      return `<b>${linkP(p)} · ${esc(p.nombre)}</b><br>${badgeEtapa(p.etapa)} ${pillPlan(st)}<br>
+        ${esc(p.segmento)} · ${esc(p.municipio)} · proyectista: ${p.proyectista_id ? esc(nombreDe(p.proyectista_id)) : '—'}<br>
+        Gas requerido: <b>${fecha(p.fecha_requerida_gas)}</b>${p.elemento_pep ? ` · PEP ${esc(p.elemento_pep)}` : ''}${p.capex != null ? ` · CAPEX ${fmtMXN(p.capex)}` : ''}<br>
+        ${avs.length ? `Avance de obra: <b>${Number(avs[0].porcentaje)}%</b> (${fecha(avs[0].fecha)})<br>` : ''}
+        ${lics.length ? `Licencias: ${lics.map((l) => `${esc(l.tipo)} – ${esc(l.estatus)}`).join('; ')}<br>` : ''}
+        ${p.bloqueo ? `<span class="vencido">Bloqueo: ${esc(p.bloqueo)}</span>` : ''}`;
+    }
+  }
+
+  // 4. Atrasados / en riesgo
+  if (/atras|retras|riesgo|tarde|demora/.test(q)) {
+    const soloRiesgo = /riesgo/.test(q) && !/atras|retras/.test(q);
+    const filas = D.proyectos.filter((p) => enSeg(p) && activa(p)).map((p) => ({ p, st: estadoPlan(p) }))
+      .filter((x) => x.st && (soloRiesgo ? x.st.clase === 'riesgo' : x.st.clase === 'mal' || (/riesgo/.test(q) && x.st.clase === 'riesgo')));
+    const t = soloRiesgo ? 'en riesgo' : /riesgo/.test(q) ? 'atrasados o en riesgo' : 'atrasados';
+    if (!filas.length) return `No hay proyectos ${t}${txtSeg}. 🎉`;
+    return `<b>Proyectos ${t}${txtSeg}: ${filas.length}</b>` + lista(filas.map(({ p, st }) => `${linkP(p)} · ${esc(p.nombre)} · ${esc(nombreCorto(p.etapa))} ${pillPlan(st)}`));
+  }
+
+  // 5. Gas requerido / puestas en servicio en un periodo
+  if (/\bgas\b|puesta en servicio|entreg|servicio/.test(q)) {
+    const per = periodoDe(q, 60);
+    const filas = D.proyectos.filter((p) => enSeg(p) && p.fecha_requerida_gas && num(p.etapa) !== N_CANCEL)
+      .filter((p) => { const d = diaDe(p.fecha_requerida_gas); return d >= per.ini && d <= per.fin; })
+      .sort((a, b) => (a.fecha_requerida_gas < b.fecha_requerida_gas ? -1 : 1));
+    if (!filas.length) return `Ningún proyecto requiere gas en ${per.etiqueta}${txtSeg}.`;
+    return `<b>Proyectos que requieren gas en ${per.etiqueta}${txtSeg}: ${filas.length}</b>` +
+      lista(filas.map((p) => `${linkP(p)} · ${esc(p.nombre)} · <b>${fecha(p.fecha_requerida_gas)}</b> · ${esc(nombreCorto(p.etapa))} ${pillPlan(estadoPlan(p))}`));
+  }
+
+  // 6. Pendientes de aprobación
+  if (/aprob/.test(q)) {
+    const filas = D.proyectos.filter((p) => num(p.etapa) === N_APROB && enSeg(p));
+    if (!filas.length) return `No hay anteproyectos esperando aprobación${txtSeg}.`;
+    return `<b>Anteproyectos por aprobar${txtSeg}: ${filas.length}</b>` + lista(filas.map((p) => `${linkP(p)} · ${esc(p.nombre)} · lo aprueba el <b>${esc(aprobadorDe(p.segmento))}</b>`));
+  }
+
+  // 7. Bloqueos
+  if (/bloque|detenid|frenad|parad/.test(q)) {
+    const filas = D.proyectos.filter((p) => p.bloqueo && enSeg(p) && activa(p));
+    if (!filas.length) return `No hay proyectos con bloqueo registrado${txtSeg}.`;
+    return `<b>Proyectos con bloqueo${txtSeg}: ${filas.length}</b>` + lista(filas.map((p) => `${linkP(p)} · ${esc(p.nombre)}: ${esc(p.bloqueo)}`));
+  }
+
+  // 8. Cuántos proyectos / por etapa
+  if (/cuant|proyectos|etapa|resumen/.test(q)) {
+    const etapa = ETAPAS.find((e) => q.includes(norm(nombreCorto(e))));
+    const base = D.proyectos.filter(enSeg);
+    if (etapa) {
+      const fs = base.filter((p) => p.etapa === etapa);
+      return `<b>${esc(etapa)}${txtSeg}: ${fs.length} proyecto${fs.length === 1 ? '' : 's'}</b>` + (fs.length ? lista(fs.map((p) => `${linkP(p)} · ${esc(p.nombre)} ${pillPlan(estadoPlan(p))}`)) : '');
+    }
+    const act = base.filter(activa);
+    const porEt = ETAPAS.map((e) => [e, act.filter((p) => p.etapa === e).length]).filter(([, n]) => n);
+    return `<b>${act.length} proyectos activos${txtSeg}</b> (${base.length - act.length} entregados o cancelados)` + lista(porEt.map(([e, n]) => `${esc(e)}: <b>${n}</b>`), 20);
+  }
+
+  return null;
+}
+
+const SUGERENCIAS = ['¿Qué licencias vencen en los próximos 30 días?', '¿Cuánto CAPEX voy a ejercer en mayo?', '¿Qué proyectos están atrasados?',
+  '¿Qué proyectos requieren gas en diciembre?', '¿Qué anteproyectos faltan por aprobar?', '¿Cuántos proyectos hay por etapa?'];
+
+function montarChat() {
+  S.chat = S.chat || { msgs: [] };
+  if ($('#chatBtn')) return;
+  const btn = document.createElement('button');
+  btn.id = 'chatBtn'; btn.className = 'chat-btn'; btn.title = 'Preguntar al asistente'; btn.textContent = '💬';
+  const panel = document.createElement('section');
+  panel.id = 'chatPanel'; panel.className = 'chat-panel'; panel.hidden = true;
+  panel.innerHTML = `<div class="chat-h"><b>Asistente PMO</b><button class="link" id="chatCerrar" aria-label="Cerrar">✕</button></div>
+    <div class="chat-msgs" id="chatMsgs"></div>
+    <div class="chat-sug" id="chatSug">${SUGERENCIAS.map((s) => `<button class="chip-btn">${esc(s)}</button>`).join('')}</div>
+    <form class="chat-form" id="chatForm"><input id="chatInput" placeholder="Escribe tu pregunta…" autocomplete="off"><button class="btn chico">Enviar</button></form>`;
+  document.body.append(btn, panel);
+  const msgs = $('#chatMsgs');
+  const pintar = (rol_, html) => {
+    const d = document.createElement('div'); d.className = `chat-msg ${rol_}`; d.innerHTML = html; msgs.appendChild(d); msgs.scrollTop = msgs.scrollHeight; return d;
+  };
+  if (!S.chat.msgs.length) pintar('bot', `Hola, ${esc((S.perfil.nombre || '').split(' ')[0])}. Pregúntame sobre licencias por vencer, CAPEX, proyectos atrasados, fechas de gas, aprobaciones, bloqueos o un folio en particular.`);
+  const preguntar = async (texto) => {
+    if (!texto.trim()) return;
+    pintar('yo', esc(texto));
+    const esperando = pintar('bot', '<span class="muted">Buscando…</span>');
+    try {
+      const r = await responder(texto);
+      esperando.innerHTML = r || `No entendí la pregunta. Puedo responder sobre:<ul><li>licencias por vencer o vencidas</li><li>CAPEX de un mes, trimestre o año (y por segmento)</li><li>proyectos atrasados o en riesgo</li><li>proyectos que requieren gas en un periodo</li><li>anteproyectos por aprobar y bloqueos</li><li>estado de un proyecto (por folio o nombre)</li></ul>`;
+    } catch (e) { esperando.innerHTML = `<span class="error">${esc(errorTxt(e))}</span>`; }
+    msgs.scrollTop = msgs.scrollHeight;
+  };
+  btn.onclick = () => { panel.hidden = !panel.hidden; if (!panel.hidden) $('#chatInput').focus(); };
+  $('#chatCerrar').onclick = () => (panel.hidden = true);
+  $('#chatForm').onsubmit = (ev) => { ev.preventDefault(); const i = $('#chatInput'); const t = i.value; i.value = ''; preguntar(t); };
+  $$('#chatSug .chip-btn').forEach((b) => (b.onclick = () => preguntar(b.textContent)));
+  msgs.addEventListener('click', (e) => { if (e.target.closest('a') && window.innerWidth < 700) panel.hidden = true; });
 }
 
 init();
