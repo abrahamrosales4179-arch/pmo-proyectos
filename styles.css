@@ -321,3 +321,12 @@ input.corto { width: 70px; }
 .ob-spark polyline { fill: none; stroke: var(--azul); stroke-width: 2; stroke-linejoin: round; }
 .ob-frm { border-top: 1px solid var(--borde); padding-top: .6rem; }
 @media (max-width: 420px) { .ob-grid { grid-template-columns: 1fr; } .ob-spark { display: none; } }
+
+/* Licencias */
+.li-meses { display: grid; grid-template-columns: repeat(6, 1fr); gap: .6rem; align-items: end; height: 130px; }
+.li-mes { display: grid; grid-template-rows: auto 1fr auto; height: 100%; text-align: center; gap: .2rem; }
+.li-n { font-weight: 700; font-size: .9rem; min-height: 1.2em; }
+.li-barra { display: flex; align-items: flex-end; justify-content: center; }
+.li-barra > div { width: 60%; max-width: 46px; background: #f47230; border-radius: 4px 4px 0 0; min-height: 0; }
+.li-mes small { color: var(--muted); font-size: .75rem; }
+.tabla select[data-lic] { min-width: 118px; } .tabla input[data-venc] { min-width: 140px; }

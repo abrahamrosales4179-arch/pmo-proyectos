@@ -322,6 +322,7 @@ function pantallaPrincipal() {
       ${S.ganttListo ? '<a href="#/gantt" data-r="gantt">Gantt general</a>' : ''}
       ${S.ganttListo ? '<a href="#/capex" data-r="capex">CAPEX</a>' : ''}
       <a href="#/obras" data-r="obras">Obras</a>
+      <a href="#/licencias" data-r="licencias">Licencias</a>
       ${puedeCrear() ? '<a href="#/nueva" data-r="nueva">Nueva solicitud</a>' : ''}
       ${esAdmin() ? '<a href="#/admin" data-r="admin">Administración</a>' : ''}
     </nav>
@@ -343,6 +344,7 @@ function router() {
   if (ruta === 'gantt') return vistaGanttGeneral();
   if (ruta === 'capex') return vistaCapex();
   if (ruta === 'obras') return vistaObras();
+  if (ruta === 'licencias') return vistaLicencias();
   if (ruta === 'p' && id) return vistaDetalle(id, pestana);
   if (ruta === 'admin') return vistaAdmin();
   if (ruta === 'cuenta') return vistaCuenta();
@@ -908,6 +910,97 @@ function formAvance(cont, p, ult, alGuardar) {
     if (S.chat) S.chat.datos = null;
     await alGuardar();
   };
+}
+
+
+// ---------------------------------------------------------------------
+// Licencias: todas las licencias de todos los proyectos
+// ---------------------------------------------------------------------
+async function vistaLicencias() {
+  const v = vista('Cargando licencias…');
+  const [rl, rp] = await Promise.all([sb.from('licencias').select('*'), sb.from('proyectos').select('id,folio,nombre,segmento,municipio,etapa')]);
+  if (rl.error || rp.error) { v.innerHTML = `<p class="error">${esc(errorTxt(rl.error || rp.error))}</p>`; return; }
+  const porId = Object.fromEntries(rp.data.map((p) => [p.id, p]));
+  const hoy = diaDe(hoyISO());
+  const todas = rl.data.filter((l) => porId[l.proyecto_id]).map((l) => {
+    const p = porId[l.proyecto_id];
+    const dias = l.fecha_vencimiento ? Math.round((diaDe(l.fecha_vencimiento) - hoy) / DIA) : null;
+    // Situación: vencida (aprobada con fecha pasada), por vencer (≤30 días), vigente, en trámite, rechazada
+    const sit = l.estatus === 'Rechazada' ? 'rechazada' : ['Pendiente', 'En trámite'].includes(l.estatus) ? 'tramite'
+      : dias != null && dias < 0 ? 'vencida' : dias != null && dias <= 30 ? 'porvencer' : 'vigente';
+    return { l, p, dias, sit, activo: activa(p) };
+  });
+  const SIT = { vencida: ['Vencidas', 'mal'], porvencer: ['Vencen en 30 días', 'riesgo'], vigente: ['Vigentes', 'ok'], tramite: ['En trámite', ''], rechazada: ['Rechazadas', 'mal'] };
+  const f = { sit: '', seg: '', dep: '', q: '', inactivos: false };
+  const deps = [...new Set(todas.map((x) => x.l.dependencia).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'es'));
+
+  v.innerHTML = `<div class="titulo"><h1>Licencias</h1>
+      <div class="gg-filtros">
+        <select id="liSeg"><option value="">Todos los segmentos</option>${SEGMENTOS.map((x) => `<option>${x}</option>`).join('')}</select>
+        <select id="liDep"><option value="">Todas las dependencias</option>${deps.map((d) => `<option>${esc(d)}</option>`).join('')}</select>
+        <label class="switch"><input type="checkbox" id="liInact"> Incluir entregados y cancelados</label>
+      </div></div>
+    <div class="kpis" id="liKpis"></div>
+    <section class="card"><h2>Vencimientos de los próximos 6 meses</h2><div id="liMeses"></div></section>
+    <input id="liBuscar" class="buscar" type="search" placeholder="Buscar por folio, proyecto, tipo de licencia o dependencia…">
+    <div id="liLista"></div>`;
+
+  const pintar = () => {
+    const base = todas.filter((x) => (f.inactivos || x.activo) && (!f.seg || x.p.segmento === f.seg) && (!f.dep || x.l.dependencia === f.dep));
+    $('#liKpis').innerHTML = Object.entries(SIT).map(([k, [t, c]]) => {
+      const n = base.filter((x) => x.sit === k).length;
+      return `<button class="kpi ${f.sit === k ? 'activo' : ''} ${(k === 'vencida' || k === 'porvencer') && n ? 'alerta' : ''}" data-sit="${k}"><b>${n}</b><span>${t}</span></button>`;
+    }).join('') + `<button class="kpi ${!f.sit ? 'activo' : ''}" data-sit=""><b>${base.length}</b><span>Total</span></button>`;
+
+    // Vencimientos por mes (barras simples, solo licencias aprobadas con fecha futura)
+    const meses = Array.from({ length: 6 }, (_, i) => new Date(hoy.getFullYear(), hoy.getMonth() + i, 1, 12));
+    const cuenta = meses.map((m) => base.filter((x) => x.l.estatus === 'Aprobada' && x.dias != null && x.dias >= 0 && mesClave(diaDe(x.l.fecha_vencimiento)) === mesClave(m)));
+    const max = Math.max(1, ...cuenta.map((c) => c.length));
+    $('#liMeses').innerHTML = `<div class="li-meses">${meses.map((m, i) => `<div class="li-mes" title="${cuenta[i].map((x) => `${x.p.folio} · ${x.l.tipo}`).join('\n')}">
+        <span class="li-n">${cuenta[i].length || ''}</span><div class="li-barra"><div style="height:${(cuenta[i].length / max) * 100}%"></div></div>
+        <small>${m.toLocaleDateString('es-MX', { month: 'short', year: '2-digit' })}</small></div>`).join('')}</div>`;
+
+    const q = norm(f.q);
+    const orden = { vencida: 0, porvencer: 1, tramite: 2, vigente: 3, rechazada: 4 };
+    const lista_ = base.filter((x) => (!f.sit || x.sit === f.sit) && (!q || [x.p.folio, x.p.nombre, x.l.tipo, x.l.dependencia].some((t) => norm(t || '').includes(q))))
+      .sort((a, b) => orden[a.sit] - orden[b.sit] || (a.dias ?? 99999) - (b.dias ?? 99999));
+    const edita = gestionaLicencias();
+    $('#liLista').innerHTML = lista_.length ? `<div class="tabla-wrap"><table class="tabla">
+      <thead><tr><th>Proyecto</th><th>Licencia</th><th>Dependencia</th><th>Estatus</th><th>Ingreso</th><th>Vencimiento</th><th>Situación</th></tr></thead><tbody>
+      ${lista_.map(({ l, p, dias, sit }) => `<tr>
+        <td><a href="#/p/${p.id}/expediente"><b>${esc(p.folio)}</b></a><br><small>${esc(p.nombre)}</small><br><small class="muted">${esc(nombreCorto(p.etapa))}</small></td>
+        <td>${esc(l.tipo)}${l.notas ? `<br><small class="muted">${esc(l.notas)}</small>` : ''}</td>
+        <td>${esc(l.dependencia || '—')}</td>
+        <td>${edita ? `<select data-lic="${l.id}">${ESTATUS_LIC.map((e) => `<option ${e === l.estatus ? 'selected' : ''}>${e}</option>`).join('')}</select>` : esc(l.estatus)}</td>
+        <td>${fecha(l.fecha_ingreso)}</td>
+        <td>${edita ? `<input type="date" data-venc="${l.id}" value="${esc(l.fecha_vencimiento || '')}">` : fecha(l.fecha_vencimiento)}</td>
+        <td><span class="plan ${SIT[sit][1]}">${sit === 'vencida' ? `Vencida hace ${-dias} días` : sit === 'porvencer' ? (dias === 0 ? 'Vence hoy' : `Vence en ${dias} días`) : sit === 'vigente' ? (dias != null ? `Vigente · ${dias} días` : 'Vigente') : SIT[sit][0].replace(/s$/, '')}</span></td>
+      </tr>`).join('')}</tbody></table></div>` : '<p class="vacio">No hay licencias en esta vista.</p>';
+
+    $$('.kpi[data-sit]', v).forEach((b) => (b.onclick = () => { f.sit = b.dataset.sit; pintar(); }));
+    $$('[data-lic]', v).forEach((sel) => (sel.onchange = async () => {
+      const { error } = await sb.from('licencias').update({ estatus: sel.value }).eq('id', Number(sel.dataset.lic));
+      if (error) return fallo(error);
+      const x = todas.find((t) => t.l.id === Number(sel.dataset.lic)); x.l.estatus = sel.value; recalc(x);
+      toast('Estatus actualizado'); if (S.chat) S.chat.datos = null; pintar();
+    }));
+    $$('[data-venc]', v).forEach((inp) => (inp.onchange = async () => {
+      const { error } = await sb.from('licencias').update({ fecha_vencimiento: inp.value || null }).eq('id', Number(inp.dataset.venc));
+      if (error) return fallo(error);
+      const x = todas.find((t) => t.l.id === Number(inp.dataset.venc)); x.l.fecha_vencimiento = inp.value || null; recalc(x);
+      toast('Vencimiento actualizado'); if (S.chat) S.chat.datos = null; pintar();
+    }));
+  };
+  const recalc = (x) => {
+    x.dias = x.l.fecha_vencimiento ? Math.round((diaDe(x.l.fecha_vencimiento) - hoy) / DIA) : null;
+    x.sit = x.l.estatus === 'Rechazada' ? 'rechazada' : ['Pendiente', 'En trámite'].includes(x.l.estatus) ? 'tramite'
+      : x.dias != null && x.dias < 0 ? 'vencida' : x.dias != null && x.dias <= 30 ? 'porvencer' : 'vigente';
+  };
+  $('#liSeg').onchange = (e) => { f.seg = e.target.value; pintar(); };
+  $('#liDep').onchange = (e) => { f.dep = e.target.value; pintar(); };
+  $('#liInact').onchange = (e) => { f.inactivos = e.target.checked; pintar(); };
+  $('#liBuscar').oninput = (e) => { f.q = e.target.value; pintar(); };
+  pintar();
 }
 
 // ---------------------------------------------------------------------
