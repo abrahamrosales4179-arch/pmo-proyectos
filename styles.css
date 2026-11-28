@@ -1,3 +1,4 @@
+[hidden] { display: none !important; }
 :root {
   --azul: #1f5fa8;
   --azul-osc: #174a83;
@@ -306,3 +307,17 @@ input.corto { width: 70px; }
 .chat-form { display: flex; gap: .4rem; padding: .6rem; border-top: 1px solid var(--borde); }
 .chat-form input { flex: 1; }
 @media (max-width: 600px) { .chat-panel { right: 12px; bottom: 80px; } .chat-btn { right: 14px; bottom: 14px; } }
+
+/* Obras (tablero del supervisor) */
+.ob-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1rem; }
+.ob-card { margin: 0; display: flex; flex-direction: column; gap: .5rem; }
+.ob-card .card-h { align-items: flex-start; }
+.ob-card p { margin: 0; }
+.ob-av { display: flex; align-items: center; gap: .6rem; }
+.ob-av .progreso { flex: 1; position: relative; margin: 0; overflow: visible; }
+.ob-av b { font-size: 1.1rem; min-width: 3.2rem; text-align: right; }
+.ob-esperado { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--texto); opacity: .55; }
+.ob-spark { width: 120px; height: 30px; flex: none; }
+.ob-spark polyline { fill: none; stroke: var(--azul); stroke-width: 2; stroke-linejoin: round; }
+.ob-frm { border-top: 1px solid var(--borde); padding-top: .6rem; }
+@media (max-width: 420px) { .ob-grid { grid-template-columns: 1fr; } .ob-spark { display: none; } }

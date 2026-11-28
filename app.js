@@ -321,6 +321,7 @@ function pantallaPrincipal() {
       <a href="#/inicio" data-r="inicio">Inicio</a>
       ${S.ganttListo ? '<a href="#/gantt" data-r="gantt">Gantt general</a>' : ''}
       ${S.ganttListo ? '<a href="#/capex" data-r="capex">CAPEX</a>' : ''}
+      <a href="#/obras" data-r="obras">Obras</a>
       ${puedeCrear() ? '<a href="#/nueva" data-r="nueva">Nueva solicitud</a>' : ''}
       ${esAdmin() ? '<a href="#/admin" data-r="admin">Administración</a>' : ''}
     </nav>
@@ -341,6 +342,7 @@ function router() {
   if (ruta === 'nueva') return vistaNueva();
   if (ruta === 'gantt') return vistaGanttGeneral();
   if (ruta === 'capex') return vistaCapex();
+  if (ruta === 'obras') return vistaObras();
   if (ruta === 'p' && id) return vistaDetalle(id, pestana);
   if (ruta === 'admin') return vistaAdmin();
   if (ruta === 'cuenta') return vistaCuenta();
@@ -746,6 +748,166 @@ async function vistaCapex() {
   };
   $('#cxSeg').onchange = (e) => { f.seg = e.target.value; pintar(); };
   pintar();
+}
+
+
+// ---------------------------------------------------------------------
+// Obras: tablero del supervisor de obra (todas las obras en un solo lugar)
+// ---------------------------------------------------------------------
+const puedeReportarAvance = () => ['Construcción', 'Líder', 'Administrador'].includes(rol());
+
+// Resumen de avance de una obra: % actual, ritmo, término proyectado vs plan, días sin reporte
+function estadoObra(p, avs, inicioObra) {
+  const orden = [...avs].sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : b.id - a.id));
+  const ult = orden[0] || null;
+  const pct = ult ? Number(ult.porcentaje) : 0;
+  const plan = planDe(p);
+  const fc = plan?.filas.find((f) => f.n === N_CONST) || null;
+  const hoy = diaDe(hoyISO());
+  const out = { ult, pct, avs: orden, fc, ritmo: null, finEst: null, difSem: null, diasSinReporte: ult ? Math.round((hoy - diaDe(ult.fecha)) / DIA) : null };
+  if (ult && inicioObra && pct > 0 && pct < 100) {
+    const dias = Math.max(1, Math.round((diaDe(ult.fecha) - inicioObra) / DIA));
+    out.ritmo = Math.round((pct / dias) * 7 * 10) / 10;
+    out.finEst = sumaDias(diaDe(ult.fecha), Math.round(((100 - pct) / pct) * dias));
+    if (fc) out.difSem = Math.round(((out.finEst - fc.fin) / DIA / 7) * 10) / 10;
+  }
+  // % esperado hoy según el plan (lineal dentro de la etapa de Construcción)
+  if (fc && num(p.etapa) === N_CONST) out.esperado = Math.max(0, Math.min(100, Math.round(((hoy - fc.inicio) / (fc.fin - fc.inicio)) * 100)));
+  return out;
+}
+
+// Mini gráfica del % reportado en el tiempo
+function sparkAvance(avs) {
+  const pts = [...avs].reverse();
+  if (pts.length < 2) return '';
+  const W = 120, H = 30;
+  const t0 = diaDe(pts[0].fecha).getTime(), t1 = diaDe(pts[pts.length - 1].fecha).getTime() || t0 + 1;
+  const xy = pts.map((a) => `${(((diaDe(a.fecha).getTime() - t0) / Math.max(1, t1 - t0)) * (W - 4) + 2).toFixed(1)},${(H - 2 - (Number(a.porcentaje) / 100) * (H - 4)).toFixed(1)}`).join(' ');
+  return `<svg class="ob-spark" viewBox="0 0 ${W} ${H}" aria-hidden="true"><polyline points="${xy}"/></svg>`;
+}
+
+async function vistaObras() {
+  const v = vista('Cargando obras…');
+  const etapaC = etapaPorNum(N_CONST);
+  const [rp, rav, rh] = await Promise.all([
+    sb.from('proyectos').select('*'),
+    sb.from('avance_obra').select('*'),
+    sb.from('historial').select('proyecto_id,created_at').eq('etapa_nueva', etapaC),
+  ]);
+  if (rp.error) { v.innerHTML = `<p class="error">${esc(errorTxt(rp.error))}</p>`; return; }
+  if (rav.error) { v.innerHTML = '<p class="muted">Falta ejecutar <b>supabase/006_avance_obra.sql</b> en Supabase.</p>'; return; }
+  const avPor = {}; rav.data.forEach((a) => (avPor[a.proyecto_id] = avPor[a.proyecto_id] || []).push(a));
+  const iniPor = {}; (rh.data || []).forEach((h) => { const d = diaDe(h.created_at); if (!iniPor[h.proyecto_id] || d < iniPor[h.proyecto_id]) iniPor[h.proyecto_id] = d; });
+  const obras = rp.data.filter((p) => num(p.etapa) >= 10 && num(p.etapa) < N_FINAL)
+    .map((p) => ({ p, e: estadoObra(p, avPor[p.id] || [], iniPor[p.id] || null) }));
+  const f = { grupo: rol() === 'Construcción' ? 'obra' : '', seg: '', q: '', soloMios: false };
+  const GRUPOS = { '': 'Todas', inicio: 'Por iniciar (Carpeta técnica)', obra: 'En construcción', cierre: 'Cierre y puesta en servicio' };
+  const enGrupo = (p, g) => !g || (g === 'inicio' ? num(p.etapa) === 10 : g === 'obra' ? num(p.etapa) === N_CONST : num(p.etapa) > N_CONST);
+  const atrasada = (x) => (x.e.difSem != null && x.e.difSem > 0) || (x.e.esperado != null && x.e.pct + 10 < x.e.esperado);
+  const sinReporte = (x) => num(x.p.etapa) === N_CONST && (x.e.diasSinReporte == null || x.e.diasSinReporte > 7);
+
+  v.innerHTML = `<div class="titulo"><h1>Obras</h1>
+      <div class="gg-filtros">
+        <select id="obGrupo">${Object.entries(GRUPOS).map(([k, t]) => `<option value="${k}" ${f.grupo === k ? 'selected' : ''}>${t}</option>`).join('')}</select>
+        <select id="obSeg"><option value="">Todos los segmentos</option>${SEGMENTOS.map((x) => `<option>${x}</option>`).join('')}</select>
+        ${puedeReportarAvance() ? '<label class="switch"><input type="checkbox" id="obMios"> Solo las que yo reporto</label>' : ''}
+      </div></div>
+    <div class="kpis" id="obKpis"></div>
+    <input id="obBuscar" class="buscar" type="search" placeholder="Buscar por folio, nombre o municipio…">
+    <div class="ob-grid" id="obLista"></div>`;
+
+  const tarjeta = ({ p, e }) => {
+    const n = num(p.etapa);
+    const dif = e.difSem;
+    const estadoTxt = n === 10 ? `<span class="muted">Inicio planeado: ${e.fc ? fecha(isoDe(e.fc.inicio)) : '—'}</span>`
+      : e.pct >= 100 ? '<span class="ok-txt"><b>Obra terminada</b></span>'
+      : e.finEst ? `Término proyectado <b>${fecha(isoDe(e.finEst))}</b> ${dif > 0 ? `<span class="vencido">(+${dif} sem vs plan)</span>` : `<span class="ok-txt">(${dif === 0 ? 'en plan' : `${-dif} sem antes`})</span>`}`
+      : `<span class="muted">Plan: ${e.fc ? `${fecha(isoDe(e.fc.inicio))} – ${fecha(isoDe(e.fc.fin))}` : '—'}</span>`;
+    const alerta = n === N_CONST && (e.diasSinReporte == null ? '<span class="pill">Sin reportes</span>' : e.diasSinReporte > 7 ? `<span class="pill">${e.diasSinReporte} días sin reporte</span>` : '');
+    return `<article class="card ob-card" data-id="${p.id}">
+      <div class="card-h"><div><a href="#/p/${p.id}/construccion"><b>${esc(p.folio)}</b></a> · ${esc(p.nombre)}<br>
+        <small class="muted">${esc(p.segmento)} · ${esc(p.municipio)}${p.elemento_pep ? ` · PEP ${esc(p.elemento_pep)}` : ''}</small></div>${badgeEtapa(p.etapa)}</div>
+      <div class="ob-av"><div class="progreso"><div style="width:${Math.min(100, e.pct)}%"></div>${e.esperado != null ? `<i class="ob-esperado" style="left:${e.esperado}%" title="Esperado hoy según plan: ${e.esperado}%"></i>` : ''}</div>
+        <b>${e.pct}%</b>${sparkAvance(e.avs)}</div>
+      <p class="chico">${e.ult ? `Último: ${fecha(e.ult.fecha)} · ${esc(nombreDe(e.ult.usuario_id))}${e.ult.nota ? ` — <i>${esc(e.ult.nota)}</i>` : ''}` : '<span class="muted">Sin reportes de avance</span>'}
+        ${e.esperado != null ? `<br><span class="muted">Esperado hoy según plan: ${e.esperado}%</span>` : ''}${e.ritmo ? ` · <span class="muted">ritmo ${e.ritmo}%/sem</span>` : ''}</p>
+      <p class="chico">${estadoTxt} ${alerta || ''}</p>
+      ${p.bloqueo ? `<p class="chico vencido">⚠ ${esc(p.bloqueo)}</p>` : ''}
+      <div class="botones">${puedeReportarAvance() && e.pct < 100 ? '<button class="btn chico" data-reportar>Registrar avance</button>' : ''}<a class="btn sec chico" href="#/p/${p.id}/construccion">Ver obra</a></div>
+      <div class="ob-form"></div>
+    </article>`;
+  };
+
+  const pintar = () => {
+    const base = obras.filter((x) => (!f.seg || x.p.segmento === f.seg) && (!f.soloMios || x.e.avs.some((a) => a.usuario_id === S.perfil.id)));
+    const enObra = base.filter((x) => num(x.p.etapa) === N_CONST);
+    $('#obKpis').innerHTML = `
+      <button class="kpi ${f.grupo === 'inicio' ? 'activo' : ''}" data-g="inicio"><b>${base.filter((x) => enGrupo(x.p, 'inicio')).length}</b><span>Por iniciar</span></button>
+      <button class="kpi ${f.grupo === 'obra' ? 'activo' : ''}" data-g="obra"><b>${enObra.length}</b><span>En construcción</span></button>
+      <button class="kpi ${f.grupo === 'cierre' ? 'activo' : ''}" data-g="cierre"><b>${base.filter((x) => enGrupo(x.p, 'cierre')).length}</b><span>Cierre y puesta en servicio</span></button>
+      <div class="kpi ${enObra.filter(atrasada).length ? 'alerta' : ''}"><b>${enObra.filter(atrasada).length}</b><span>Obras atrasadas</span></div>
+      <div class="kpi ${enObra.filter(sinReporte).length ? 'alerta' : ''}"><b>${enObra.filter(sinReporte).length}</b><span>Sin reporte en 7 días</span></div>`;
+    const q = norm(f.q);
+    const lista_ = base.filter((x) => enGrupo(x.p, f.grupo) && (!q || [x.p.folio, x.p.nombre, x.p.municipio].some((t) => norm(t || '').includes(q))))
+      .sort((a, b) => num(a.p.etapa) - num(b.p.etapa) || (atrasada(b) - atrasada(a)) || ((a.e.diasSinReporte ?? 999) < (b.e.diasSinReporte ?? 999) ? 1 : -1));
+    $('#obLista').innerHTML = lista_.length ? lista_.map(tarjeta).join('') : '<p class="vacio">No hay obras en esta vista.</p>';
+    $$('.kpi[data-g]', v).forEach((b) => (b.onclick = () => { f.grupo = f.grupo === b.dataset.g ? '' : b.dataset.g; $('#obGrupo').value = f.grupo; pintar(); }));
+    $$('[data-reportar]', v).forEach((b) => (b.onclick = () => {
+      const card = b.closest('.ob-card');
+      const x = obras.find((o) => o.p.id === card.dataset.id);
+      formAvance(card.querySelector('.ob-form'), x.p, x.e.ult, async () => {
+        const { data } = await sb.from('avance_obra').select('*').eq('proyecto_id', x.p.id);
+        avPor[x.p.id] = data || [];
+        x.e = estadoObra(x.p, avPor[x.p.id], iniPor[x.p.id] || null);
+        pintar();
+      });
+      b.hidden = true;
+    }));
+  };
+  $('#obGrupo').onchange = (e) => { f.grupo = e.target.value; pintar(); };
+  $('#obSeg').onchange = (e) => { f.seg = e.target.value; pintar(); };
+  $('#obBuscar').oninput = (e) => { f.q = e.target.value; pintar(); };
+  const mios = $('#obMios'); if (mios) mios.onchange = () => { f.soloMios = mios.checked; pintar(); };
+  pintar();
+}
+
+// Formulario de avance reutilizable (por tramos si el proyecto tiene estimación por tramos)
+function formAvance(cont, p, ult, alGuardar) {
+  const tramos = (p.const_detalle?.tramos || []).filter((t) => Number(t.longitud) > 0);
+  const prev = new Map((ult?.detalle || []).map((x) => [`${x.material}|${x.diametro}|${x.longitud}`, Number(x.instalado || 0)]));
+  const pctAct = ult ? Number(ult.porcentaje) : 0;
+  cont.innerHTML = `<form class="grid mini ob-frm">
+    <label>Fecha<input type="date" name="fecha" value="${hoyISO()}" max="${hoyISO()}" required></label>
+    ${tramos.length ? `<div class="full"><div class="tabla-wrap"><table class="tabla compacta"><thead><tr><th>Tramo</th><th>Longitud (m)</th><th>Instalado (m, acumulado)</th></tr></thead><tbody>
+        ${tramos.map((t, i) => `<tr><td>${esc(t.material)} ${esc(t.diametro)}</td><td>${Number(t.longitud).toLocaleString('es-MX')}</td>
+          <td><input type="number" min="0" max="${Number(t.longitud)}" step="1" data-inst="${i}" value="${prev.get(`${t.material}|${t.diametro}|${t.longitud}`) ?? ''}"></td></tr>`).join('')}
+      </tbody></table></div><p class="muted chico">El % se calcula con los metros; puedes ajustarlo.</p></div>` : ''}
+    <label>Avance acumulado (%) *<input type="number" name="porcentaje" min="${pctAct}" max="100" step="0.1" value="${pctAct || ''}" required>
+      <small class="muted">Último: ${pctAct}%</small></label>
+    <label class="full">Nota<textarea name="nota" rows="2" placeholder="Ej. tramo 2 en zanja, falta cruce de avenida"></textarea></label>
+    <div class="full botones"><button type="button" class="btn sec chico" data-cancelar>Cancelar</button><button class="btn chico">Guardar avance</button></div>
+  </form>`;
+  const f = $('form', cont);
+  $$('[data-inst]', f).forEach((x) => (x.oninput = () => {
+    const tot = tramos.reduce((t, y) => t + Number(y.longitud), 0);
+    const ins = tramos.reduce((t, y, i) => t + Math.min(Number($(`[data-inst="${i}"]`, f).value || 0), Number(y.longitud)), 0);
+    if (tot) f.elements.porcentaje.value = Math.round((ins / tot) * 1000) / 10;
+  }));
+  $('[data-cancelar]', f).onclick = () => { cont.innerHTML = ''; const b = cont.closest('.ob-card')?.querySelector('[data-reportar]'); if (b) b.hidden = false; };
+  f.onsubmit = async (ev) => {
+    ev.preventDefault();
+    if (!f.reportValidity()) return;
+    const btn = $('button:not([data-cancelar])', f); btn.disabled = true;
+    const detalle = tramos.length ? tramos.map((t, i) => ({ material: t.material, diametro: t.diametro, longitud: Number(t.longitud), instalado: Number($(`[data-inst="${i}"]`, f).value || 0) })) : null;
+    const { error } = await sb.from('avance_obra').insert({
+      proyecto_id: p.id, fecha: f.elements.fecha.value, porcentaje: Number(f.elements.porcentaje.value),
+      detalle, nota: f.elements.nota.value.trim() || null, usuario_id: S.perfil.id,
+    });
+    if (error) { btn.disabled = false; return fallo(error); }
+    toast(`Avance de ${p.folio} guardado: ${f.elements.porcentaje.value}%`);
+    if (S.chat) S.chat.datos = null;
+    await alGuardar();
+  };
 }
 
 // ---------------------------------------------------------------------
