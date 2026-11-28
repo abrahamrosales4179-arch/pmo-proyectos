@@ -264,7 +264,7 @@ begin
         (v_id, 'Licencia de construcción (obra en vía pública)', 'Municipio de ' || r.municipio,
          case when r.n = 8 and r.retraso > 1 then 'En trámite' else 'Aprobada' end,
          ent[8] + 2, ent[8] + 180, case when r.n = 8 and r.retraso > 1 then 'En revisión en ventanilla' end),
-        (v_id, 'Permiso de ruptura de pavimento', 'Obras Públicas ' || r.municipio,
+        (v_id, 'Permiso de ruptura de pavimento', 'Municipio de ' || r.municipio,
          case when r.n = 8 then 'En trámite' else 'Aprobada' end,
          ent[8] + 3, ent[8] + 120, null);
     end if;

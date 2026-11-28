@@ -937,7 +937,9 @@ async function vistaLicencias() {
   v.innerHTML = `<div class="titulo"><h1>Licencias</h1>
       <div class="gg-filtros">
         <select id="liSeg"><option value="">Todos los segmentos</option>${SEGMENTOS.map((x) => `<option>${x}</option>`).join('')}</select>
-        <select id="liDep"><option value="">Todas las dependencias</option>${deps.map((d) => `<option>${esc(d)}</option>`).join('')}</select>
+        <select id="liDep"><option value="">Todas las dependencias</option>
+          <optgroup label="Por tipo"><option value="t:Municipio">Municipios (todos)</option><option value="t:Movilidad municipal">Movilidad municipal (todas)</option><option value="t:Movilidad estatal">Movilidad estatal</option></optgroup>
+          <optgroup label="Dependencia">${deps.map((d) => `<option>${esc(d)}</option>`).join('')}</optgroup></select>
         <label class="switch"><input type="checkbox" id="liInact"> Incluir entregados y cancelados</label>
       </div></div>
     <div class="kpis" id="liKpis"></div>
@@ -946,7 +948,7 @@ async function vistaLicencias() {
     <div id="liLista"></div>`;
 
   const pintar = () => {
-    const base = todas.filter((x) => (f.inactivos || x.activo) && (!f.seg || x.p.segmento === f.seg) && (!f.dep || x.l.dependencia === f.dep));
+    const base = todas.filter((x) => (f.inactivos || x.activo) && (!f.seg || x.p.segmento === f.seg) && (!f.dep || (f.dep.startsWith('t:') ? tipoDependencia(x.l.dependencia) === f.dep.slice(2) : x.l.dependencia === f.dep)));
     $('#liKpis').innerHTML = Object.entries(SIT).map(([k, [t, c]]) => {
       const n = base.filter((x) => x.sit === k).length;
       return `<button class="kpi ${f.sit === k ? 'activo' : ''} ${(k === 'vencida' || k === 'porvencer') && n ? 'alerta' : ''}" data-sit="${k}"><b>${n}</b><span>${t}</span></button>`;
@@ -1139,6 +1141,10 @@ function puedeActualizar(p) {
     || (r === 'Comercial' && p.solicitante_id === me && num(p.etapa) === 0);
 }
 const gestionaLicencias = () => ['Administrador', 'Líder', 'Permisos'].includes(rol());
+// Dependencias que emiten licencias: el municipio (incluye obras públicas), la movilidad municipal y la movilidad estatal (una para todos)
+const DEP_ESTATAL = 'Movilidad estatal';
+const dependenciasDe = (mun) => [`Municipio de ${mun}`, `Movilidad municipal de ${mun}`, DEP_ESTATAL];
+const tipoDependencia = (d) => (!d ? '' : d === DEP_ESTATAL ? 'Movilidad estatal' : d.startsWith('Movilidad municipal') ? 'Movilidad municipal' : d.startsWith('Municipio de') ? 'Municipio' : 'Otra');
 
 // Avance de cada etapa a la siguiente: quién lo hace y qué se revisa antes
 const AVANCES = {
@@ -1379,7 +1385,8 @@ async function vistaDetalle(id, pestana) {
             </tr>`).join('')}</tbody></table></div>` : '<p class="muted">Sin licencias registradas.</p>'}
           ${gestionaLicencias() ? `<form id="frmLic" class="grid mini">
             <label>Tipo *<input name="tipo" required placeholder="Licencia de obra"></label>
-            <label>Dependencia<input name="dependencia" placeholder="Municipio de ${esc(p.municipio)}"></label>
+            <label>Dependencia *<select name="dependencia" required>${dependenciasDe(p.municipio).map((d) => `<option>${esc(d)}</option>`).join('')}<option value="__otra">Otra…</option></select></label>
+            <label id="lblDepOtra" hidden>¿Cuál dependencia?<input name="dependencia_otra" placeholder="Nombre de la dependencia"></label>
             <label>Ingreso<input type="date" name="fecha_ingreso"></label>
             <label>Vencimiento<input type="date" name="fecha_vencimiento"></label>
             <label class="full">Notas<input name="notas"></label>
@@ -1843,12 +1850,16 @@ async function vistaDetalle(id, pestana) {
 
   // --- Licencias
   const frmLic = $('#frmLic');
+  if (frmLic) frmLic.elements.dependencia.onchange = (e) => {
+    const otra = e.target.value === '__otra';
+    $('#lblDepOtra').hidden = !otra; frmLic.elements.dependencia_otra.required = otra;
+  };
   if (frmLic) frmLic.onsubmit = async (ev) => {
     ev.preventDefault();
     if (!frmLic.reportValidity()) return;
     const fd = Object.fromEntries(new FormData(frmLic));
     const { error } = await sb.from('licencias').insert({
-      proyecto_id: p.id, tipo: fd.tipo.trim(), dependencia: fd.dependencia.trim() || null,
+      proyecto_id: p.id, tipo: fd.tipo.trim(), dependencia: (fd.dependencia === '__otra' ? (fd.dependencia_otra || '').trim() : fd.dependencia) || null,
       fecha_ingreso: fd.fecha_ingreso || null, fecha_vencimiento: fd.fecha_vencimiento || null, notas: fd.notas.trim() || null,
     });
     if (error) return fallo(error);
